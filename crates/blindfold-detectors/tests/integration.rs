@@ -1,3 +1,5 @@
+//! Integration and property-like tests for the public detector API.
+
 use blindfold_detectors::{
     DetectorSet, DotenvCatalog, RedactionMode, RedactionOptions, Redactor, SecretKind,
 };

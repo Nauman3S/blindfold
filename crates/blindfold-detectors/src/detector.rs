@@ -41,7 +41,7 @@ impl KnownFormats {
     fn new() -> Result<Self, BuildError> {
         let specifications = [
             (
-                r"\b(sk-(?:proj-|svcacct-)?[A-Za-z0-9_-]{20,})\b",
+                r"\b(sk-(?:(?:proj|svcacct|admin)-[A-Za-z0-9_-]{20,}|[A-Za-z0-9]{20,}))\b",
                 1,
                 SecretKind::OpenAiApiKey,
                 Confidence::Certain,
@@ -83,7 +83,7 @@ impl KnownFormats {
                 "known.aws_access_key",
             ),
             (
-                r"(?i)\bBearer[ \t]+([A-Za-z0-9._~+/-]{16,}={0,2})",
+                r"(?:^|[^A-Za-z0-9_])[Bb][Ee][Aa][Rr][Ee][Rr][ \t]+([-A-Za-z0-9._~+/=]{16,})",
                 1,
                 SecretKind::BearerToken,
                 Confidence::High,
@@ -111,7 +111,7 @@ impl KnownFormats {
                 "known.pem_private_key",
             ),
             (
-                r"(?i)\b[a-z][a-z0-9+.-]{1,20}://[^/\s:@]+:([^/@\s]+)@[^/\s]+",
+                r"(?:^|[^A-Za-z0-9_])[A-Za-z][-A-Za-z0-9+.]{1,20}://[^/ \t\r\n:@]+:([^/@ \t\r\n]+)@[^/ \t\r\n]+",
                 1,
                 SecretKind::CredentialUrl,
                 Confidence::Certain,
@@ -149,7 +149,7 @@ struct ContextualDetector {
 impl ContextualDetector {
     fn new() -> Result<Self, BuildError> {
         let assignment = Regex::new(
-            r#"(?im)(?:^|[,{;\s])([A-Za-z][A-Za-z0-9_.-]{1,63})[ \t]*(?:=|:)[ \t]*["']?([A-Za-z0-9+/_.~=-]{16,512})"#,
+            r#"(?m)(?:^|[,{;\s])([A-Za-z][-A-Za-z0-9_.]{1,63})[ \t]*(?:=|:)[ \t]*["']?([-A-Za-z0-9+/_.~=]{16,512})"#,
         )
         .map_err(|_| BuildError {
             detector: "context.assignment",
