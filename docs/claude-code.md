@@ -1,10 +1,15 @@
 # Claude Code Integration
 
+The shared wrapper and opt-out workflow is documented in
+[Coding Agent Wrappers](coding-agents.md). This page records Claude-specific boundary
+details.
+
 ## Status
 
-`blindfold run claude` is implemented as a degraded preview. It starts a local
-Anthropic-compatible application proxy and points the Claude process at that proxy.
-Strict mode refuses to start because the full boundary cannot yet be established.
+`blindfold run claude` starts a local Anthropic-compatible application proxy and points
+the Claude process at it with an ephemeral `ANTHROPIC_BASE_URL`. No persistent Claude
+configuration is changed. Strict mode refuses to start because the full boundary cannot
+yet be established.
 
 ## Intended Protected Paths
 
@@ -38,10 +43,16 @@ MVP boundary. It does not create an OS sandbox or network firewall.
 ```sh
 blindfold init
 blindfold doctor
-blindfold run claude --anthropic-upstream https://api.anthropic.com
+blindfold run claude
 ```
 
-Use fake or isolated credentials while evaluating the preview.
+Pass native Claude arguments after `--`, for example:
+
+```sh
+blindfold run claude -- --model sonnet
+```
+
+Use `blindfold run claude --no-proxy -- ...` for a visible one-run bypass.
 
 ## Troubleshooting Contract
 

@@ -94,6 +94,14 @@ pub(crate) fn run(root: &Path) -> DoctorReport {
                 label: "Claude command",
                 outcome: check_command(&config.claude.command),
             },
+            Check {
+                label: "Codex command",
+                outcome: check_optional_command("codex"),
+            },
+            Check {
+                label: "OpenCode command",
+                outcome: check_optional_command("opencode"),
+            },
         ],
     }
 }
@@ -180,6 +188,13 @@ fn check_command(command: &str) -> Outcome {
         Outcome::Pass("available")
     } else {
         Outcome::Fail("not found on PATH".to_owned())
+    }
+}
+
+fn check_optional_command(command: &str) -> Outcome {
+    match check_command(command) {
+        Outcome::Fail(_) => Outcome::Info("not installed; this agent wrapper is unavailable"),
+        outcome => outcome,
     }
 }
 

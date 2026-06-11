@@ -10,6 +10,8 @@ project follows Semantic Versioning as described in
 
 ### Added
 
+- Zero-persistence wrappers for Claude Code, Codex CLI, and OpenCode.
+- `blindfold shell-init` and visible per-invocation wrapper opt-out support.
 - Secret detectors, redaction modes, bounded repository scanning, and safe reports.
 - Destination-aware policy presets and scoped restoration decisions.
 - XChaCha20-Poly1305 local vault with safe audit metadata.
@@ -25,5 +27,9 @@ project follows Semantic Versioning as described in
 - Architecture decisions for the Rust baseline, vault direction, SafeRef format, and
   managed support boundary.
 - Isolated fake credential fixtures for future security regression tests.
+
+### Fixed
+
+- CLI proxy startup now satisfies the detector's required streaming overlap.
 
 [Unreleased]: https://github.com/Nauman3S/blindfold/compare/HEAD

@@ -4,6 +4,7 @@ use std::{
     error::Error,
     fs,
     io::Write,
+    os::unix::fs::PermissionsExt,
     path::{Path, PathBuf},
     process::{Command, Output, Stdio},
     sync::atomic::{AtomicU64, Ordering},
@@ -66,6 +67,18 @@ fn stdout(output: &Output) -> String {
 
 fn stderr(output: &Output) -> String {
     String::from_utf8_lossy(&output.stderr).into_owned()
+}
+
+fn fake_agent(directory: &Path) -> Result<PathBuf, std::io::Error> {
+    let path = directory.join("fake-agent");
+    fs::write(
+        &path,
+        "#!/bin/sh\nprintf '%s\\n' \"$@\" > agent-args\nprintf '%s' \"${ANTHROPIC_BASE_URL-}\" > anthropic-base\nprintf '%s' \"${OPENCODE_CONFIG_CONTENT-}\" > opencode-config\n",
+    )?;
+    let mut permissions = fs::metadata(&path)?.permissions();
+    permissions.set_mode(0o700);
+    fs::set_permissions(&path, permissions)?;
+    Ok(path)
 }
 
 #[test]
@@ -272,20 +285,141 @@ fn vault_lists_only_safe_references() -> Result<(), Box<dyn Error>> {
 }
 
 #[test]
-fn strict_claude_preview_refuses_degraded_boundary() -> Result<(), Box<dyn Error>> {
+fn strict_agent_preview_refuses_degraded_boundary() -> Result<(), Box<dyn Error>> {
     let directory = TestDirectory::new()?;
+    let output = blindfold(directory.path(), &["run", "claude", "--strict"])?;
+
+    assert!(!output.status.success());
+    assert!(stderr(&output).contains("strict agent mode is unavailable"));
+    Ok(())
+}
+
+#[test]
+fn claude_wrapper_routes_through_anthropic_proxy() -> Result<(), Box<dyn Error>> {
+    let directory = TestDirectory::new()?;
+    let agent = fake_agent(directory.path())?;
     let output = blindfold(
         directory.path(),
         &[
             "run",
             "claude",
-            "--strict",
-            "--anthropic-upstream",
-            "https://api.anthropic.com",
+            "--agent-command",
+            agent.to_str().ok_or("non-UTF-8 agent path")?,
+            "--",
+            "--version",
         ],
     )?;
 
-    assert!(!output.status.success());
-    assert!(stderr(&output).contains("strict Claude mode is unavailable"));
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert_eq!(
+        fs::read_to_string(directory.path().join("agent-args"))?,
+        "--version\n"
+    );
+    let base = fs::read_to_string(directory.path().join("anthropic-base"))?;
+    assert!(base.starts_with("http://127.0.0.1:"));
+    assert!(base.ends_with("/anthropic"));
+    Ok(())
+}
+
+#[test]
+fn codex_wrapper_injects_one_run_base_url_override() -> Result<(), Box<dyn Error>> {
+    let directory = TestDirectory::new()?;
+    let agent = fake_agent(directory.path())?;
+    let output = blindfold(
+        directory.path(),
+        &[
+            "run",
+            "codex",
+            "--agent-command",
+            agent.to_str().ok_or("non-UTF-8 agent path")?,
+            "--",
+            "review",
+        ],
+    )?;
+
+    assert!(output.status.success(), "{}", stderr(&output));
+    let arguments = fs::read_to_string(directory.path().join("agent-args"))?;
+    assert!(arguments.contains("-c\nopenai_base_url=\"http://127.0.0.1:"));
+    assert!(arguments.contains("/openai/v1\"\nreview\n"));
+    Ok(())
+}
+
+#[test]
+fn opencode_wrapper_merges_inline_config_and_routes_both_providers() -> Result<(), Box<dyn Error>> {
+    let directory = TestDirectory::new()?;
+    let agent = fake_agent(directory.path())?;
+    let output = Command::new(env!("CARGO_BIN_EXE_blindfold"))
+        .args([
+            "run",
+            "opencode",
+            "--agent-command",
+            agent.to_str().ok_or("non-UTF-8 agent path")?,
+            "--",
+            "run",
+            "hello",
+        ])
+        .env(
+            "OPENCODE_CONFIG_CONTENT",
+            r#"{"theme":"system","provider":{"openai":{"options":{"timeout":1000}}}}"#,
+        )
+        .current_dir(directory.path())
+        .output()?;
+
+    assert!(output.status.success(), "{}", stderr(&output));
+    let config: serde_json::Value = serde_json::from_str(&fs::read_to_string(
+        directory.path().join("opencode-config"),
+    )?)?;
+    assert_eq!(config["theme"], "system");
+    assert_eq!(config["provider"]["openai"]["options"]["timeout"], 1000);
+    assert!(
+        config["provider"]["openai"]["options"]["baseURL"]
+            .as_str()
+            .is_some_and(|url| url.ends_with("/openai/v1"))
+    );
+    assert!(
+        config["provider"]["anthropic"]["options"]["baseURL"]
+            .as_str()
+            .is_some_and(|url| url.ends_with("/anthropic/v1"))
+    );
+    Ok(())
+}
+
+#[test]
+fn wrapper_bypass_does_not_inject_proxy_configuration() -> Result<(), Box<dyn Error>> {
+    let directory = TestDirectory::new()?;
+    let agent = fake_agent(directory.path())?;
+    let output = blindfold(
+        directory.path(),
+        &[
+            "run",
+            "codex",
+            "--no-proxy",
+            "--agent-command",
+            agent.to_str().ok_or("non-UTF-8 agent path")?,
+            "--",
+            "--version",
+        ],
+    )?;
+
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert_eq!(
+        fs::read_to_string(directory.path().join("agent-args"))?,
+        "--version\n"
+    );
+    assert!(stderr(&output).contains("bypass requested"));
+    Ok(())
+}
+
+#[test]
+fn shell_init_wraps_all_agents_and_exposes_bypass_helper() -> Result<(), Box<dyn Error>> {
+    let directory = TestDirectory::new()?;
+    let output = blindfold(directory.path(), &["shell-init", "zsh"])?;
+    let script = stdout(&output);
+
+    assert!(output.status.success());
+    assert!(script.contains("blindfold run claude"));
+    assert!(script.contains("blindfold run codex"));
+    assert!(script.contains("blindfold run opencode"));
+    assert!(script.contains("bf-off()"));
     Ok(())
 }

@@ -34,6 +34,7 @@ use tokio_util::sync::CancellationToken;
 use crate::{config, doctor};
 
 const MASTER_KEY_ENV: &str = "BLINDFOLD_MASTER_KEY";
+const BYPASS_ENV: &str = "BLINDFOLD_BYPASS";
 
 pub(crate) async fn run() -> ExitCode {
     let matches = cli().get_matches();
@@ -60,6 +61,7 @@ pub(crate) async fn run() -> ExitCode {
         Some(("proxy", args)) => proxy_command(args).await,
         Some(("mcp", args)) => mcp_command(args),
         Some(("run", args)) => run_agent_command(args).await,
+        Some(("shell-init", args)) => shell_init_command(args),
         _ => ExitCode::FAILURE,
     }
 }
@@ -198,14 +200,44 @@ fn cli() -> Command {
         .subcommand(
             Command::new("run")
                 .about("Run a supported coding agent through a declared boundary")
-                .arg(Arg::new("agent").required(true).value_parser(["claude"]))
+                .arg(
+                    Arg::new("agent")
+                        .required(true)
+                        .value_parser(["claude", "codex", "opencode"]),
+                )
                 .arg(Arg::new("strict").long("strict").action(ArgAction::SetTrue))
                 .arg(
                     Arg::new("anthropic")
                         .long("anthropic-upstream")
-                        .required(true),
+                        .default_value("https://api.anthropic.com"),
+                )
+                .arg(
+                    Arg::new("openai")
+                        .long("openai-upstream")
+                        .default_value("https://api.openai.com/v1"),
+                )
+                .arg(
+                    Arg::new("no_proxy")
+                        .long("no-proxy")
+                        .help("Run the native agent directly for this invocation")
+                        .action(ArgAction::SetTrue),
+                )
+                .arg(
+                    Arg::new("agent_command")
+                        .long("agent-command")
+                        .help("Override the native agent executable")
+                        .value_name("PATH"),
                 )
                 .arg(Arg::new("agent_arg").num_args(0..).trailing_var_arg(true)),
+        )
+        .subcommand(
+            Command::new("shell-init")
+                .about("Print opt-out-friendly shell wrappers for coding agents")
+                .arg(
+                    Arg::new("shell")
+                        .default_value("zsh")
+                        .value_parser(["bash", "zsh"]),
+                ),
         )
 }
 
@@ -564,6 +596,7 @@ async fn proxy_command(args: &ArgMatches) -> ExitCode {
     };
     let config = ProxyConfig {
         bind_addr: listen,
+        stream_overlap: 512,
         upstreams,
         ..ProxyConfig::default()
     };
@@ -629,19 +662,41 @@ fn mcp_command(args: &ArgMatches) -> ExitCode {
 }
 
 async fn run_agent_command(args: &ArgMatches) -> ExitCode {
+    let agent = args
+        .get_one::<String>("agent")
+        .map_or("claude", String::as_str);
+    let agent_command = args
+        .get_one::<String>("agent_command")
+        .map_or(agent, String::as_str);
+    let agent_args = args
+        .get_many::<String>("agent_arg")
+        .map(|values| values.cloned().collect::<Vec<_>>())
+        .unwrap_or_default();
+    let bypass = args.get_flag("no_proxy") || env_flag(BYPASS_ENV);
+
+    if bypass {
+        eprintln!("Blindfold bypass requested; launching {agent} without the managed proxy.");
+        return run_native_agent(agent, agent_command, &agent_args).await;
+    }
     if args.get_flag("strict") {
         return fail(
-            "strict Claude mode is unavailable because upstream credential injection is not yet isolated from the agent process",
+            "strict agent mode is unavailable because direct filesystem and network bypass prevention is not yet established",
         );
     }
+
     eprintln!("Blindfold degraded mode:");
-    eprintln!("- managed Anthropic request/response proxy: available");
+    eprintln!("- managed provider request/response proxy: available");
     eprintln!("- interactive terminal output sanitization: unavailable");
     eprintln!("- direct filesystem/network bypass prevention: unavailable");
     eprintln!("- provider credential isolation from the agent environment: unavailable");
-    let Some(upstream) = args.get_one::<String>("anthropic") else {
-        return fail("Anthropic upstream is required");
-    };
+    eprintln!("- one-run opt-out: --no-proxy or {BYPASS_ENV}=1");
+
+    if agent == "codex" && codex_overrides_proxy(&agent_args) {
+        return fail(
+            "Codex arguments override the managed OpenAI base URL; remove that override or use --no-proxy",
+        );
+    }
+
     let listen: SocketAddr = match "127.0.0.1:0".parse() {
         Ok(address) => address,
         Err(_) => return fail("internal proxy address is invalid"),
@@ -650,14 +705,15 @@ async fn run_agent_command(args: &ArgMatches) -> ExitCode {
         Ok(sanitizer) => Arc::new(sanitizer),
         Err(code) => return code,
     };
-    let upstream = match Upstream::new("anthropic", upstream, Provider::Anthropic) {
-        Ok(upstream) => upstream,
-        Err(error) => return fail(&error.to_string()),
+    let upstreams = match agent_upstreams(agent, args) {
+        Ok(upstreams) => upstreams,
+        Err(code) => return code,
     };
     let proxy = match Proxy::new(
         ProxyConfig {
             bind_addr: listen,
-            upstreams: vec![upstream],
+            stream_overlap: 512,
+            upstreams,
             ..ProxyConfig::default()
         },
         sanitizer,
@@ -669,23 +725,159 @@ async fn run_agent_command(args: &ArgMatches) -> ExitCode {
         Ok(bound) => bound,
         Err(error) => return fail(&error.to_string()),
     };
-    let base_url = format!("http://{}/anthropic", bound.local_addr());
+    let proxy_origin = format!("http://{}", bound.local_addr());
     let cancellation = CancellationToken::new();
     let proxy_cancellation = cancellation.clone();
     let proxy_task = tokio::spawn(bound.serve(proxy_cancellation));
 
-    let mut command = tokio::process::Command::new("claude");
-    if let Some(values) = args.get_many::<String>("agent_arg") {
-        command.args(values);
-    }
-    command.env("ANTHROPIC_BASE_URL", &base_url);
+    let mut command = tokio::process::Command::new(agent_command);
+    configure_agent_command(agent, &mut command, &agent_args, &proxy_origin);
     let status = command.status().await;
     cancellation.cancel();
     let _ = proxy_task.await;
     match status {
         Ok(status) => exit_from_code(status.code()),
-        Err(error) => fail(&format!("could not run Claude: {}", error.kind())),
+        Err(error) => fail(&format!("could not run agent: {}", error.kind())),
     }
+}
+
+fn agent_upstreams(agent: &str, args: &ArgMatches) -> Result<Vec<Upstream>, ExitCode> {
+    let anthropic = args
+        .get_one::<String>("anthropic")
+        .map_or("https://api.anthropic.com", String::as_str);
+    let openai = args
+        .get_one::<String>("openai")
+        .map_or("https://api.openai.com/v1", String::as_str);
+    let upstream = |name, url, provider| {
+        Upstream::new(name, url, provider).map_err(|error| fail(&error.to_string()))
+    };
+    match agent {
+        "claude" => Ok(vec![upstream("anthropic", anthropic, Provider::Anthropic)?]),
+        "codex" => Ok(vec![upstream("openai", openai, Provider::OpenAi)?]),
+        "opencode" => Ok(vec![
+            upstream("anthropic", anthropic, Provider::Anthropic)?,
+            upstream("openai", openai, Provider::OpenAi)?,
+        ]),
+        _ => Err(fail("unsupported coding agent")),
+    }
+}
+
+fn configure_agent_command(
+    agent: &str,
+    command: &mut tokio::process::Command,
+    agent_args: &[String],
+    proxy_origin: &str,
+) {
+    match agent {
+        "claude" => {
+            command.args(agent_args);
+            command.env("ANTHROPIC_BASE_URL", format!("{proxy_origin}/anthropic"));
+        }
+        "codex" => {
+            command.arg("-c");
+            command.arg(format!("openai_base_url=\"{proxy_origin}/openai/v1\""));
+            command.args(agent_args);
+        }
+        "opencode" => {
+            command.args(agent_args);
+            command.env(
+                "OPENCODE_CONFIG_CONTENT",
+                opencode_proxy_config(proxy_origin),
+            );
+        }
+        _ => {}
+    }
+}
+
+fn opencode_proxy_config(proxy_origin: &str) -> String {
+    let mut config = env::var("OPENCODE_CONFIG_CONTENT")
+        .ok()
+        .and_then(|value| serde_json::from_str::<serde_json::Value>(&value).ok())
+        .filter(serde_json::Value::is_object)
+        .unwrap_or_else(|| serde_json::json!({}));
+    merge_json(
+        &mut config,
+        serde_json::json!({
+            "provider": {
+                "anthropic": {
+                    "options": {
+                        "baseURL": format!("{proxy_origin}/anthropic/v1")
+                    }
+                },
+                "openai": {
+                    "options": {
+                        "baseURL": format!("{proxy_origin}/openai/v1")
+                    }
+                }
+            }
+        }),
+    );
+    config.to_string()
+}
+
+fn merge_json(target: &mut serde_json::Value, overlay: serde_json::Value) {
+    match (target, overlay) {
+        (serde_json::Value::Object(target), serde_json::Value::Object(overlay)) => {
+            for (key, value) in overlay {
+                merge_json(target.entry(key).or_insert(serde_json::Value::Null), value);
+            }
+        }
+        (target, overlay) => *target = overlay,
+    }
+}
+
+fn codex_overrides_proxy(args: &[String]) -> bool {
+    args.windows(2).any(|pair| {
+        matches!(pair[0].as_str(), "-c" | "--config")
+            && pair[1].trim_start().starts_with("openai_base_url")
+    }) || args
+        .iter()
+        .any(|arg| arg.starts_with("--config=openai_base_url"))
+}
+
+async fn run_native_agent(agent: &str, command: &str, args: &[String]) -> ExitCode {
+    match tokio::process::Command::new(command)
+        .args(args)
+        .status()
+        .await
+    {
+        Ok(status) => exit_from_code(status.code()),
+        Err(error) => fail(&format!("could not run {agent}: {}", error.kind())),
+    }
+}
+
+fn env_flag(name: &str) -> bool {
+    env::var(name).is_ok_and(|value| {
+        matches!(
+            value.trim().to_ascii_lowercase().as_str(),
+            "1" | "true" | "yes" | "on"
+        )
+    })
+}
+
+fn shell_init_command(args: &ArgMatches) -> ExitCode {
+    let shell = args
+        .get_one::<String>("shell")
+        .map_or("zsh", String::as_str);
+    if !matches!(shell, "bash" | "zsh") {
+        return fail("unsupported shell");
+    }
+    print!(
+        r#"claude() {{
+  if [[ "${{BLINDFOLD_BYPASS:-0}}" == "1" ]]; then command claude "$@"; else command blindfold run claude -- "$@"; fi
+}}
+codex() {{
+  if [[ "${{BLINDFOLD_BYPASS:-0}}" == "1" ]]; then command codex "$@"; else command blindfold run codex -- "$@"; fi
+}}
+opencode() {{
+  if [[ "${{BLINDFOLD_BYPASS:-0}}" == "1" ]]; then command opencode "$@"; else command blindfold run opencode -- "$@"; fi
+}}
+bf-off() {{
+  BLINDFOLD_BYPASS=1 "$@"
+}}
+"#
+    );
+    ExitCode::SUCCESS
 }
 
 struct DetectorSanitizer {

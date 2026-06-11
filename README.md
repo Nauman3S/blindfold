@@ -223,28 +223,52 @@ The proxy sanitizes supported JSON text fields and SSE data, enforces body/time 
 rejects proxy loops, and does not perform transparent TLS interception. Authentication
 headers are forwarded to the allowlisted upstream and must be managed by the caller.
 
-## Claude Code Preview
+## Coding Agent Wrappers
 
-Run Claude through the managed Anthropic application proxy:
-
-```sh
-blindfold run claude \
-  --anthropic-upstream https://api.anthropic.com \
-  -- --version
-```
-
-The command prints protected, degraded, and unavailable controls before launch.
-Interactive terminal output is not sanitized by this preview.
-
-Strict mode currently refuses to start:
+Launch an installed coding agent through an ephemeral loopback proxy. Native arguments
+go after `--`:
 
 ```sh
-blindfold run claude --strict --anthropic-upstream https://api.anthropic.com
+blindfold run claude -- --model sonnet
+blindfold run codex -- review
+blindfold run opencode -- run "inspect this project"
 ```
 
-Reason: provider credential injection has not yet been isolated from the Claude process,
-and Blindfold cannot prevent direct filesystem or network bypasses. The preview makes no
-sandbox claim.
+No persistent Claude, Codex, or OpenCode configuration is changed. Existing agent
+authentication continues to work normally.
+
+Keep typing the native command names by activating shell wrappers:
+
+```sh
+eval "$(blindfold shell-init zsh)"
+
+claude
+codex review
+opencode run "fix the tests"
+```
+
+Use `bash` instead of `zsh` when appropriate. Opt out for one command:
+
+```sh
+bf-off claude
+bf-off codex review
+bf-off opencode
+```
+
+The explicit equivalents are:
+
+```sh
+BLINDFOLD_BYPASS=1 codex review
+blindfold run codex --no-proxy -- review
+```
+
+The wrapper prints protected and unavailable controls before launch. It currently
+sanitizes supported provider traffic, but not interactive terminal output, and it cannot
+prevent direct filesystem or network bypasses. `--strict` refuses to start while those
+controls remain unavailable.
+
+See [Coding agent wrappers](docs/coding-agents.md) for custom gateway examples and
+agent-specific routing behavior.
 
 ## Scan Generated Diffs
 
@@ -322,6 +346,7 @@ Blindfold does not protect:
 - Windows.
 
 Read [Guarantees](docs/guarantees.md), [Threat Model](THREAT_MODEL.md),
+[Coding agent wrappers](docs/coding-agents.md),
 [Claude Code limitations](docs/claude-code.md), [MCP preview](docs/mcp.md), and
 [SDK preview](docs/sdk.md) before using Blindfold.
 
