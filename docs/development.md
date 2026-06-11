@@ -47,6 +47,19 @@ TypeScript SDK preview:
 npm --prefix sdk/typescript test
 ```
 
+Focused iteration commands:
+
+```sh
+cargo test -p blindfold-detectors --all-targets
+cargo test -p blindfold-proxy --all-targets
+cargo test -p blindfold-vault --all-targets
+cargo test -p blindfold-cli --all-targets
+```
+
+Use `cargo tree --workspace --depth 2` before adding a dependency. Prefer an established
+crate when it replaces substantial security-sensitive parsing, cryptography, filesystem,
+or matching code. Keep local code when a dependency would save only a few obvious lines.
+
 `cargo audit` checks the RustSec advisory database. `cargo deny` enforces advisory,
 license, source, and duplicate-dependency policy from `deny.toml`. A deny exception must
 be narrow, justified in configuration, and linked to a tracking issue before merge.

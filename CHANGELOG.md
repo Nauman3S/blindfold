@@ -10,6 +10,9 @@ project follows Semantic Versioning as described in
 
 ### Added
 
+- Cryptographically randomized operation-local Rust surrogates.
+- Complete scan reporting with a distinct incomplete-scan exit code.
+- Atomic redacted file output with overwrite protection.
 - A task-oriented `USE_CASES.md` beginner guide with copy-paste workflows.
 - Zero-persistence wrappers for Claude Code, Codex CLI, and OpenCode.
 - `blindfold shell-init` and visible per-invocation wrapper opt-out support.
@@ -31,6 +34,15 @@ project follows Semantic Versioning as described in
 
 ### Fixed
 
+- Proxy sanitization now covers nested tool payloads and rejects unsupported non-empty
+  media types.
+- Diff scanning no longer treats a whole line as safe because it contains a SafeRef or
+  a placeholder-like substring.
+- Vault and audit paths reject symlinked storage targets.
+- TypeScript SDK tokens are unpredictable and overlapping values are replaced
+  longest-first.
+- Contextual detector matches no longer redact only a prefix of punctuation-rich or
+  oversized values.
 - CLI proxy startup now satisfies the detector's required streaming overlap.
 
 [Unreleased]: https://github.com/Nauman3S/blindfold/compare/HEAD

@@ -2,8 +2,10 @@
 
 ## Status
 
-The policy engine is planned for `v0.1.0` and is not implemented in the current
-skeleton. This document fixes the security semantics that implementation must preserve.
+The deterministic policy library and preset matrix are implemented. CLI inspection is
+available through `blindfold policy check`. Runtime commands do not yet load and enforce
+the complete project/local override model described below, so configuration precedence
+remains preview work.
 
 ## Inputs
 

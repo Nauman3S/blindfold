@@ -31,9 +31,9 @@ SafeRef mappings <--> encrypted local vault
 safe metadata    ---> append-only audit
 ```
 
-The core owns security-domain types and invariants. The CLI composes configuration,
-scanning, policy, vault, proxy, execution, and integration components without weakening
-their defaults.
+The core owns security-domain types and invariants. The CLI composes scanning, vault,
+proxy, execution, and integration components. Full runtime enforcement of the versioned
+project configuration and policy override hierarchy is not yet integrated.
 
 ## Managed Data Flow
 
@@ -43,8 +43,9 @@ their defaults.
 3. Detectors identify sensitive spans without logging raw input.
 4. Policy selects `redact`, `block`, `warn`, or `restore` based on sensitivity, source,
    destination, operation, and mode.
-5. Redaction replaces a value with an opaque SafeRef. The mapping is encrypted locally.
-6. Only a policy-trusted local operation may resolve the SafeRef.
+5. Redaction replaces a value with a non-restorable marker, randomized operation-local
+   surrogate, environment reference, or SafeRef according to the managed operation.
+6. Only a policy-trusted local operation may resolve a vault-backed SafeRef.
 7. Managed responses and process output pass through sanitization before the agent sees
    them.
 8. Audit records contain safe metadata, never plaintext values.
@@ -67,7 +68,8 @@ outside the managed boundary.
 The current portable vault stores authenticated XChaCha20-Poly1305 encrypted records in
 an atomically replaced local file. Its 32-byte master key is supplied by the caller and
 is not stored beside ciphertext. macOS Keychain and Linux Secret Service adapters remain
-future work. See [ADR 0002](decisions/0002-vault-backend.md).
+future work. Vault and audit paths reject symlinks, but descriptor-relative filesystem
+operations remain future hardening. See [ADR 0002](decisions/0002-vault-backend.md).
 
 ## SafeRefs
 
@@ -90,7 +92,8 @@ frameworks are avoided. See [ADR 0001](decisions/0001-rust-baseline.md).
 
 ## Platform Boundary
 
-The first release targets macOS and Linux. Windows is explicitly unsupported. Platform
-details and key-service assumptions are documented in
+macOS and Linux are development targets pending release installation and key-management
+evidence. Windows is explicitly unsupported. Platform details and key-service
+assumptions are documented in
 [ADR 0004](decisions/0004-managed-boundary-and-platforms.md) and
 [platforms.md](platforms.md).

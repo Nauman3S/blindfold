@@ -33,8 +33,9 @@ blindfold init
 blindfold doctor
 ```
 
-You run `blindfold init` once per project. Do not run it again if
-`.blindfold.yaml` already exists.
+`init` creates a preview configuration in the current working directory. `doctor`
+validates it, but most runtime commands currently use CLI defaults and flags. Do not run
+`init` again if `.blindfold.yaml` already exists.
 
 ## Use Case 1: Run Codex Now
 
@@ -133,7 +134,7 @@ Blindfold prints a bypass notice when it launches an agent without the proxy.
 
 ## Use Case 5: Check a Project Before Sharing It
 
-Scan the current project:
+Scan the current working directory:
 
 ```sh
 blindfold scan .
@@ -151,8 +152,10 @@ Use JSON output in scripts:
 blindfold scan . --json
 ```
 
-Exit code `0` means no findings. Exit code `2` means Blindfold found sensitive content.
-The report shows the file and location, not the detected value.
+Exit code `0` means a complete scan with no findings. Exit code `2` means a complete
+scan found sensitive content. Exit code `3` means the scan was incomplete because of an
+I/O error, oversized file, or traversal budget. Policy skips such as ignored or binary
+files are reported but do not by themselves make a scan incomplete.
 
 ## Use Case 6: Hide Secrets in a File
 
@@ -167,8 +170,11 @@ This prints the safe result to the terminal. It does not modify `.env`.
 Write the redacted output to a different file:
 
 ```sh
-blindfold redact .env > env.redacted
+blindfold redact .env --output env.redacted
 ```
+
+Existing output files are refused by default. Use `--force` only when replacement is
+intentional; Blindfold performs forced replacement atomically.
 
 For dotenv files, preserve variable names:
 
@@ -224,8 +230,7 @@ Do not place the secret itself in command arguments:
 your-command --token "$DEMO_API_KEY"
 ```
 
-Pass secrets through environment variables or standard input when the application
-supports it.
+Pass secrets through environment variables. Managed child stdin is currently disabled.
 
 ## Use Case 8: Check Changes Before Committing
 
@@ -263,7 +268,7 @@ blindfold vault list
 Clear the current vault scope:
 
 ```sh
-blindfold vault clear
+blindfold vault clear --yes
 ```
 
 The OS keychain integration is not implemented. Do not store
@@ -274,9 +279,6 @@ The OS keychain integration is not implemented. Do not store
 For most development sessions, this is enough:
 
 ```sh
-# Once in the project
-blindfold init
-
 # Start your agent
 blindfold run codex
 

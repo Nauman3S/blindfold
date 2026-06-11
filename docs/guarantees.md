@@ -2,9 +2,9 @@
 
 ## Current State
 
-No security guarantee applies to the pre-release implementation skeleton. The statements
-below are acceptance criteria for `v0.1.0`, and will apply only after release evidence
-shows the relevant path is implemented and active.
+Blindfold is pre-release. Implemented managed paths have regression tests, but the
+statements below remain release acceptance criteria until platform and end-to-end
+evidence is complete.
 
 ## Managed-Boundary Guarantees
 

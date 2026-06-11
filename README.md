@@ -52,10 +52,12 @@ blindfold run codex
 ```
 
 Common tasks and copy-paste examples are in [USE_CASES.md](USE_CASES.md).
+The current configuration file is validated by `doctor`, but most runtime commands still
+use CLI defaults and flags; runtime configuration integration remains preview work.
 
 ## Scan Files and Directories
 
-Scan the current project:
+Scan the current working directory:
 
 ```sh
 blindfold scan .
@@ -74,7 +76,9 @@ blindfold scan . --json
 ```
 
 The scanner ignores common dependency/build directories, does not follow symlinks by
-default, skips binary files, and enforces file and total-byte limits.
+default, skips binary files, and enforces file and total-byte limits. Exit code `2`
+means findings were detected. Exit code `3` means the scan was incomplete because of an
+I/O error, oversized file, or traversal budget.
 
 ## Redact Content
 
@@ -99,6 +103,17 @@ blindfold redact config.json --mode placeholder
 blindfold redact config.json --mode surrogate
 blindfold redact config.json --mode block
 ```
+
+Write safely to a new file:
+
+```sh
+blindfold redact .env --output env.redacted
+```
+
+Blindfold refuses to overwrite an existing output unless `--force` is supplied. Forced
+replacement is atomic. Surrogate mode produces cryptographically randomized,
+operation-local opaque values; equal secrets match within one operation but cannot be
+correlated across separate runs.
 
 For a dotenv file, `env-ref` keeps the variable relationship:
 
@@ -173,10 +188,10 @@ List metadata only:
 blindfold vault list
 ```
 
-Clear the current project/session scope:
+Clear the current working-directory/session scope:
 
 ```sh
-blindfold vault clear
+blindfold vault clear --yes
 ```
 
 The key must be supplied again to reopen the vault. Do not put
@@ -221,9 +236,10 @@ curl http://127.0.0.1:8787/openai/chat/completions \
   -d '{"model":"example","messages":[{"role":"user","content":"inspect this text"}]}'
 ```
 
-The proxy sanitizes supported JSON text fields and SSE data, enforces body/time limits,
-rejects proxy loops, and does not perform transparent TLS interception. Authentication
-headers are forwarded to the allowlisted upstream and must be managed by the caller.
+The proxy sanitizes supported JSON and SSE textual fields, including nested tool
+arguments, enforces body/time limits, rejects unsupported non-empty media types and
+proxy loops, and does not perform transparent TLS interception. Authentication headers
+are forwarded to the allowlisted upstream and must be managed by the caller.
 
 ## Coding Agent Wrappers
 
