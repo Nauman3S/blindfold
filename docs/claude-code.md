@@ -2,18 +2,16 @@
 
 ## Status
 
-Claude Code support is a `v0.1.0` target. `blindfold run -- claude` is not implemented in
-the current skeleton.
+`blindfold run claude` is implemented as a degraded preview. It starts a local
+Anthropic-compatible application proxy and points the Claude process at that proxy.
+Strict mode refuses to start because the full boundary cannot yet be established.
 
 ## Intended Protected Paths
 
 The wrapper will protect only paths it can establish and verify, expected to include:
 
-- supported Anthropic-compatible LLM requests routed through the local proxy;
-- wrapper-managed model responses;
-- supported file or tool results routed through documented hooks or brokers;
-- secrets passed through `blindfold exec`; and
-- wrapper-managed stdout and stderr.
+- supported Anthropic-compatible JSON requests routed through the local proxy; and
+- supported JSON and SSE responses routed back through the proxy.
 
 Startup must list each path as protected, degraded, or unprotected.
 
@@ -28,20 +26,22 @@ The following remain unprotected unless the wrapper can explicitly mediate them:
 - unsupported Claude Code versions, hooks, plugins, or transports; and
 - child processes intentionally exfiltrating a value they were approved to receive.
 
-`--strict` must refuse to start when required proxy, hook, environment, or version checks
-cannot establish the documented boundary. It does not create an OS sandbox or network
-firewall.
+The current preview does not sanitize the interactive terminal stream, install file/tool
+hooks, isolate provider credentials from the agent environment, or prevent direct
+network/filesystem bypasses.
 
-## Planned Workflow
+`--strict` refuses to start because these controls cannot yet establish the documented
+MVP boundary. It does not create an OS sandbox or network firewall.
+
+## Preview Workflow
 
 ```sh
 blindfold init
 blindfold doctor
-blindfold run -- claude
+blindfold run claude --anthropic-upstream https://api.anthropic.com
 ```
 
-Until those commands are implemented and a release is published, do not use Blindfold
-with real credentials.
+Use fake or isolated credentials while evaluating the preview.
 
 ## Troubleshooting Contract
 

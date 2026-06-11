@@ -252,41 +252,38 @@ impl Scanner {
                 report.skipped_ignored += 1;
                 continue;
             }
-            let metadata = match fs::symlink_metadata(&path) {
-                Ok(metadata) => metadata,
-                Err(_) => {
-                    report.io_errors += 1;
-                    continue;
-                }
+            let Ok(metadata) = fs::symlink_metadata(&path) else {
+                report.io_errors += 1;
+                continue;
             };
             if metadata.file_type().is_symlink() {
                 if !self.follow_symlinks {
                     report.skipped_symlinks += 1;
                     continue;
                 }
-                let canonical = match fs::canonicalize(&path) {
-                    Ok(canonical) => canonical,
-                    Err(_) => {
-                        report.io_errors += 1;
-                        continue;
-                    }
-                };
-                if !visited.insert(canonical.clone()) {
+                let Ok(canonical) = fs::canonicalize(&path) else {
+                    report.io_errors += 1;
                     continue;
-                }
+                };
                 stack.push((canonical, depth));
                 continue;
             }
             if metadata.is_dir() {
+                if self.follow_symlinks {
+                    let Ok(canonical) = fs::canonicalize(&path) else {
+                        report.io_errors += 1;
+                        continue;
+                    };
+                    if !visited.insert(canonical) {
+                        continue;
+                    }
+                }
                 if depth >= self.limits.max_depth {
                     continue;
                 }
-                let entries = match fs::read_dir(&path) {
-                    Ok(entries) => entries,
-                    Err(_) => {
-                        report.io_errors += 1;
-                        continue;
-                    }
+                let Ok(entries) = fs::read_dir(&path) else {
+                    report.io_errors += 1;
+                    continue;
                 };
                 let mut children = Vec::new();
                 for entry in entries {
@@ -487,6 +484,35 @@ mod tests {
 
         assert_eq!(report.files_considered(), 1);
         assert!(report.limit_reached());
+        fs::remove_dir_all(root)
+            .unwrap_or_else(|error| unreachable!("fixture must be removed: {error}"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn followed_symlink_cycles_do_not_duplicate_scans() {
+        use std::os::unix::fs::symlink;
+
+        let root = temporary_directory();
+        let nested = root.join("nested");
+        fs::create_dir_all(&nested)
+            .unwrap_or_else(|error| unreachable!("fixture directory must be created: {error}"));
+        fs::write(
+            nested.join("secret.txt"),
+            "sk-proj-abcdefghijklmnopqrstuvwxyz012345",
+        )
+        .unwrap_or_else(|error| unreachable!("fixture must be written: {error}"));
+        symlink(&root, nested.join("cycle"))
+            .unwrap_or_else(|error| unreachable!("fixture symlink must be created: {error}"));
+
+        let report = ScannerBuilder::new(detectors())
+            .follow_symlinks(true)
+            .build()
+            .scan(&root)
+            .unwrap_or_else(|error| unreachable!("scan must succeed: {error}"));
+
+        assert_eq!(report.files_considered(), 1);
+        assert_eq!(report.files().len(), 1);
         fs::remove_dir_all(root)
             .unwrap_or_else(|error| unreachable!("fixture must be removed: {error}"));
     }

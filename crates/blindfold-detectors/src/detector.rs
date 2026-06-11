@@ -235,7 +235,10 @@ fn shannon_entropy(value: &str) -> f64 {
     for byte in value.bytes() {
         counts[usize::from(byte)] = counts[usize::from(byte)].saturating_add(1);
     }
-    let length = value.len() as f64;
+    let Ok(length) = u32::try_from(value.len()) else {
+        return 0.0;
+    };
+    let length = f64::from(length);
     counts
         .into_iter()
         .filter(|count| *count != 0)

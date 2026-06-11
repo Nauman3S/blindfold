@@ -3,8 +3,9 @@
 use std::{
     error::Error,
     fs,
+    io::Write,
     path::{Path, PathBuf},
-    process::{Command, Output},
+    process::{Command, Output, Stdio},
     sync::atomic::{AtomicU64, Ordering},
 };
 
@@ -39,6 +40,24 @@ fn blindfold(directory: &Path, arguments: &[&str]) -> Result<Output, std::io::Er
         .args(arguments)
         .current_dir(directory)
         .output()
+}
+
+fn blindfold_with_input(
+    directory: &Path,
+    arguments: &[&str],
+    input: &str,
+) -> Result<Output, std::io::Error> {
+    let mut child = Command::new(env!("CARGO_BIN_EXE_blindfold"))
+        .args(arguments)
+        .current_dir(directory)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?;
+    if let Some(stdin) = child.stdin.as_mut() {
+        stdin.write_all(input.as_bytes())?;
+    }
+    child.wait_with_output()
 }
 
 fn stdout(output: &Output) -> String {
@@ -133,5 +152,121 @@ fn invalid_config_error_does_not_echo_values() -> Result<(), Box<dyn Error>> {
     assert!(!doctor.status.success());
     assert!(combined.contains("proxy.host"));
     assert!(!combined.contains(sensitive_value));
+    Ok(())
+}
+
+#[test]
+fn scan_and_redact_never_print_the_raw_value() -> Result<(), Box<dyn Error>> {
+    let directory = TestDirectory::new()?;
+    let raw = "sk-proj-abcdefghijklmnopqrstuvwxyz012345";
+    fs::write(
+        directory.path().join("config.txt"),
+        format!("api_key={raw}\n"),
+    )?;
+
+    let scan = blindfold(directory.path(), &["scan", ".", "--json"])?;
+    assert_eq!(scan.status.code(), Some(2));
+    assert!(stdout(&scan).contains("openai_api_key"));
+    assert!(!stdout(&scan).contains(raw));
+
+    let redact = blindfold(directory.path(), &["redact", "config.txt"])?;
+    assert!(redact.status.success());
+    assert!(stdout(&redact).contains("[REDACTED:openai_api_key]"));
+    assert!(!stdout(&redact).contains(raw));
+    Ok(())
+}
+
+#[test]
+fn exec_injects_then_redacts_selected_secret() -> Result<(), Box<dyn Error>> {
+    let directory = TestDirectory::new()?;
+    let raw = "sk-proj-abcdefghijklmnopqrstuvwxyz012345";
+    let output = Command::new(env!("CARGO_BIN_EXE_blindfold"))
+        .args([
+            "exec",
+            "--secret",
+            "DEMO_API_KEY",
+            "--",
+            "sh",
+            "-c",
+            "printf '%s' \"$DEMO_API_KEY\"",
+        ])
+        .env("DEMO_API_KEY", raw)
+        .current_dir(directory.path())
+        .output()?;
+
+    let combined = format!("{}{}", stdout(&output), stderr(&output));
+    assert!(output.status.success());
+    assert!(!combined.contains(raw));
+    assert!(combined.contains("[REDACTED]"));
+    Ok(())
+}
+
+#[test]
+fn policy_diff_and_mcp_commands_are_safe() -> Result<(), Box<dyn Error>> {
+    let directory = TestDirectory::new()?;
+    let policy = blindfold(
+        directory.path(),
+        &[
+            "policy",
+            "check",
+            "--mode",
+            "balanced",
+            "--destination",
+            "model",
+            "--sensitivity",
+            "secret",
+        ],
+    )?;
+    assert_eq!(policy.status.code(), Some(2));
+    assert!(stdout(&policy).contains("action=Block"));
+
+    let raw = "sk-proj-abcdefghijklmnopqrstuvwxyz012345";
+    let patch = format!(
+        "diff --git a/app.js b/app.js\n--- a/app.js\n+++ b/app.js\n@@ -0,0 +1 @@\n+const key = \"{raw}\";\n"
+    );
+    fs::write(directory.path().join("change.diff"), patch)?;
+    let diff = blindfold(
+        directory.path(),
+        &["diff-check", "--patch", "change.diff", "--json"],
+    )?;
+    assert_eq!(diff.status.code(), Some(2));
+    assert!(!stdout(&diff).contains(raw));
+
+    let message =
+        format!("{{\"jsonrpc\":\"2.0\",\"id\":1,\"error\":{{\"message\":\"failed {raw}\"}}}}\n");
+    let mcp = blindfold_with_input(
+        directory.path(),
+        &["mcp", "--direction", "to-agent"],
+        &message,
+    )?;
+    assert!(mcp.status.success());
+    assert!(!stdout(&mcp).contains(raw));
+    assert!(stdout(&mcp).contains("[REDACTED:openai_api_key]"));
+    Ok(())
+}
+
+#[test]
+fn vault_lists_only_safe_references() -> Result<(), Box<dyn Error>> {
+    let directory = TestDirectory::new()?;
+    let raw = "sk-proj-abcdefghijklmnopqrstuvwxyz012345";
+    let key = "11".repeat(32);
+    let put = Command::new(env!("CARGO_BIN_EXE_blindfold"))
+        .args(["vault", "put-env", "DEMO_API_KEY"])
+        .env("BLINDFOLD_MASTER_KEY", &key)
+        .env("DEMO_API_KEY", raw)
+        .current_dir(directory.path())
+        .output()?;
+    assert!(put.status.success(), "{}", stderr(&put));
+    assert!(stdout(&put).contains("{{BLINDFOLD:v1:ENV:"));
+    assert!(!stdout(&put).contains(raw));
+
+    let list = Command::new(env!("CARGO_BIN_EXE_blindfold"))
+        .args(["vault", "list"])
+        .env("BLINDFOLD_MASTER_KEY", key)
+        .current_dir(directory.path())
+        .output()?;
+    assert!(list.status.success(), "{}", stderr(&list));
+    assert!(!stdout(&list).contains(raw));
+    assert!(stdout(&list).contains("{{BLINDFOLD:v1:ENV:"));
     Ok(())
 }

@@ -86,7 +86,7 @@ pub enum Confidence {
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 #[non_exhaustive]
 pub enum SecretKind {
-    /// OpenAI API key.
+    /// `OpenAI` API key.
     OpenAiApiKey,
     /// Anthropic API key.
     AnthropicApiKey,

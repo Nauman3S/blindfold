@@ -81,7 +81,7 @@ impl DotenvCatalog {
                 .entry(value)
                 .and_modify(|existing| {
                     if name < existing.as_str() {
-                        *existing = name.to_owned();
+                        name.clone_into(existing);
                     }
                 })
                 .or_insert_with(|| name.to_owned());
@@ -255,11 +255,19 @@ fn write_replacement(
             let next = surrogates.len() + 1;
             let index = *surrogates.entry(raw.to_owned()).or_insert(next);
             output.push_str("{{BLINDFOLD:SURROGATE:");
-            output.push_str(&format!("{index:04}"));
+            push_padded_index(output, index);
             output.push_str("}}");
         }
         RedactionMode::Block => output.push_str(raw),
     }
+}
+
+fn push_padded_index(output: &mut String, index: usize) {
+    let digits = index.to_string();
+    for _ in digits.len()..4 {
+        output.push('0');
+    }
+    output.push_str(&digits);
 }
 
 fn write_placeholder(output: &mut String, kind: SecretKind) {

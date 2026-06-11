@@ -58,7 +58,8 @@ fn arbitrary_ascii_inputs_preserve_span_and_redaction_invariants() {
             state = state
                 .wrapping_mul(6_364_136_223_846_793_005)
                 .wrapping_add(1);
-            input.push(char::from(alphabet[(state as usize) % alphabet.len()]));
+            let index = usize::from(state.to_le_bytes()[0]) % alphabet.len();
+            input.push(char::from(alphabet[index]));
         }
         let findings = detector_set.detect(&input);
         for finding in &findings {

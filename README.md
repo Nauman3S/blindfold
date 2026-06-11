@@ -2,119 +2,346 @@
 
 **Let AI agents use secrets without seeing secrets.**
 
-Blindfold is a local-first privacy and secrets boundary for AI coding agents.
+Blindfold is a local-first security boundary for AI coding workflows. It scans and
+redacts secrets, runs commands with selected environment values, proxies supported LLM
+traffic, and records safe metadata without intentionally logging raw values.
 
-```text
-Agent can use secrets through approved local operations.
-Agent cannot see raw secrets in traffic and tool output managed by Blindfold.
+Blindfold protects only operations routed through Blindfold. It is not an OS sandbox,
+network firewall, or guarantee that every unknown secret format will be detected.
+
+## Status
+
+This repository is pre-release software:
+
+- **Implemented:** scanning, redaction, policy evaluation, encrypted local vault,
+  sanitized command execution, OpenAI/Anthropic application proxy, diff scanning.
+- **Preview:** Claude wrapper, MCP stdio transformer, TypeScript SDK.
+- **Not implemented:** OS keychain adapter, transparent network interception, filesystem
+  sandbox, MCP network transports, Windows support.
+
+Use fake credentials while evaluating the project.
+
+## Install
+
+Blindfold uses Rust 1.96.0 and edition 2024.
+
+```sh
+git clone https://github.com/Nauman3S/blindfold.git
+cd blindfold
+cargo build --release
+export PATH="$PWD/target/release:$PATH"
 ```
 
-The boundary is deliberately specific: Blindfold can protect only integrations, LLM
-traffic, files, commands, and tool calls that are routed through a supported Blindfold
-component. It is not an operating-system sandbox and cannot protect paths that bypass it.
-See [Guarantees](docs/guarantees.md) and the [Threat Model](THREAT_MODEL.md).
+Confirm the binary:
 
-> **Project status:** pre-release foundation work. The workspace builds, but the security
-> controls and CLI commands described as `v0.1.0` targets are not implemented yet. Do not
-> use the current code to protect real secrets.
+```sh
+blindfold --version
+blindfold --help
+```
 
-## Planned v0.1.0 Experience
+## Quick Start
 
 ```sh
 blindfold init
 blindfold doctor
-blindfold run -- claude
+blindfold scan .
+blindfold redact .env
 ```
 
-The first release will target a managed Claude Code workflow with:
+`scan` exits with code `2` when it finds sensitive content. Findings contain locations
+and categories, not matched values.
 
-- scanning and redaction for supported secret formats;
-- SafeRefs that stand in for raw values;
-- a local LLM proxy for supported OpenAI-compatible and Anthropic-compatible traffic;
-- explicit secret injection into approved child processes;
-- sanitized managed output, logs, errors, and audit records; and
-- startup diagnostics that identify protected, degraded, and unprotected paths.
+## Scan Files and Directories
 
-These are release targets, not claims about the current skeleton.
+Scan the current project:
 
-## Managed Boundary
+```sh
+blindfold scan .
+```
 
-For a supported and correctly configured `v0.1.0` path, Blindfold is intended to:
+Scan one file:
 
-1. inspect managed input before it is sent to an LLM or returned to an agent;
-2. replace detected raw values with non-secret references;
-3. restore values only into a destination explicitly trusted by policy;
-4. avoid intentionally placing raw values in Blindfold logs, errors, audit events, or
-   agent-visible managed output; and
-5. fail closed when security-sensitive managed input cannot be interpreted safely.
+```sh
+blindfold scan config.json
+```
 
-Blindfold does **not** promise to:
+Machine-readable output:
 
-- mediate direct provider requests, direct filesystem reads, or commands that bypass it;
-- contain a malicious process or a compromised operating system or user account;
-- stop an approved child process from intentionally exfiltrating a value it receives;
-- detect every unknown, encoded, transformed, or fragmented secret; or
-- provide transparent system-wide interception.
+```sh
+blindfold scan . --json
+```
 
-Strict sandboxing and direct-egress prevention are future work. Startup output must never
-describe those controls as active when they are not.
+The scanner ignores common dependency/build directories, does not follow symlinks by
+default, skips binary files, and enforces file and total-byte limits.
 
-## Platforms
+## Redact Content
 
-`v0.1.0` supports:
+Redact a file:
 
-- macOS on currently supported Apple releases, on Apple silicon and Intel where CI and
-  release testing are available; and
-- Linux on maintained x86_64 distributions with a usable Secret Service implementation
-  for key storage.
+```sh
+blindfold redact .env
+```
 
-Windows is unsupported for `v0.1.0`: there is no release artifact, support commitment, or
-security-boundary guarantee for Windows. See [Supported Platforms](docs/platforms.md).
+Redact standard input:
+
+```sh
+printf 'Authorization: Bearer fake-token-value-1234567890\n' | blindfold redact
+```
+
+Available modes:
+
+```sh
+blindfold redact .env --mode env-ref
+blindfold redact config.json --mode schema-only
+blindfold redact config.json --mode placeholder
+blindfold redact config.json --mode surrogate
+blindfold redact config.json --mode block
+```
+
+For a dotenv file, `env-ref` keeps the variable relationship:
+
+```text
+OPENAI_API_KEY=${OPENAI_API_KEY}
+DATABASE_URL=${DATABASE_URL}
+```
+
+`block` returns a failure instead of printing transformed input when sensitive content
+is found.
+
+## Run a Command with Secrets
+
+Select each environment value explicitly:
+
+```sh
+export DEMO_API_KEY='sk-proj-fake-blindfold-example-1234567890'
+blindfold exec --secret DEMO_API_KEY -- sh -c 'test -n "$DEMO_API_KEY"; echo ready'
+```
+
+Blindfold:
+
+1. starts the child with a minimal environment;
+2. injects only selected secrets;
+3. rejects a secret embedded in command arguments;
+4. captures stdout and stderr concurrently;
+5. redacts injected values from captured output; and
+6. preserves the child exit result.
+
+This is not a process sandbox. A hostile child can transform or exfiltrate a secret it
+was explicitly given.
+
+## Check Policy Behavior
+
+```sh
+blindfold policy check \
+  --mode balanced \
+  --destination model \
+  --sensitivity secret
+```
+
+Example result:
+
+```text
+action=Block basis=Invariant mode=Balanced destination=ModelProvider sensitivity=Secret
+```
+
+Modes are `chill`, `balanced`, `strict`, and `ci`. Destinations include `model`,
+`agent`, `tool`, `child`, `file`, `log`, `audit`, `user`, and `trusted-local`.
+
+## Encrypted Local Vault
+
+The current vault uses XChaCha20-Poly1305 with a caller-supplied 32-byte master key.
+An OS keychain adapter is not implemented yet.
+
+For local evaluation, create a key without printing it:
+
+```sh
+export BLINDFOLD_MASTER_KEY="$(openssl rand -hex 32)"
+export DEMO_API_KEY='sk-proj-fake-blindfold-example-1234567890'
+```
+
+Store one environment value and receive a SafeRef:
+
+```sh
+blindfold vault put-env DEMO_API_KEY --ttl-seconds 3600
+```
+
+List metadata only:
+
+```sh
+blindfold vault list
+```
+
+Clear the current project/session scope:
+
+```sh
+blindfold vault clear
+```
+
+The key must be supplied again to reopen the vault. Do not put
+`BLINDFOLD_MASTER_KEY` in project files or shell history. Production use should wait for
+the planned macOS Keychain and Linux Secret Service adapters.
+
+## Audit Events
+
+Vault operations append safe JSON-lines metadata:
+
+```sh
+blindfold audit
+```
+
+Audit events contain closed action/outcome fields and optional SafeRefs. They do not
+contain plaintext vault values.
+
+## LLM Proxy
+
+Run a loopback proxy with an explicit upstream allowlist:
+
+```sh
+blindfold proxy \
+  --listen 127.0.0.1:8787 \
+  --openai-upstream https://api.openai.com/v1 \
+  --anthropic-upstream https://api.anthropic.com
+```
+
+Provider routes are:
+
+```text
+http://127.0.0.1:8787/openai/...
+http://127.0.0.1:8787/anthropic/...
+```
+
+Example OpenAI-compatible request:
+
+```sh
+curl http://127.0.0.1:8787/openai/chat/completions \
+  -H 'content-type: application/json' \
+  -H "authorization: Bearer $OPENAI_API_KEY" \
+  -d '{"model":"example","messages":[{"role":"user","content":"inspect this text"}]}'
+```
+
+The proxy sanitizes supported JSON text fields and SSE data, enforces body/time limits,
+rejects proxy loops, and does not perform transparent TLS interception. Authentication
+headers are forwarded to the allowlisted upstream and must be managed by the caller.
+
+## Claude Code Preview
+
+Run Claude through the managed Anthropic application proxy:
+
+```sh
+blindfold run claude \
+  --anthropic-upstream https://api.anthropic.com \
+  -- --version
+```
+
+The command prints protected, degraded, and unavailable controls before launch.
+Interactive terminal output is not sanitized by this preview.
+
+Strict mode currently refuses to start:
+
+```sh
+blindfold run claude --strict --anthropic-upstream https://api.anthropic.com
+```
+
+Reason: provider credential injection has not yet been isolated from the Claude process,
+and Blindfold cannot prevent direct filesystem or network bypasses. The preview makes no
+sandbox claim.
+
+## Scan Generated Diffs
+
+Scan tracked working-tree changes:
+
+```sh
+blindfold diff-check
+```
+
+Scan staged changes:
+
+```sh
+blindfold diff-check --staged
+```
+
+Scan a supplied patch without requiring Git:
+
+```sh
+blindfold diff-check --patch change.diff --json
+```
+
+Reports include safe locations, severity, and remediation without printing the detected
+value. Exit code `2` means findings were detected.
+
+## MCP Stdio Preview
+
+Sanitize one newline-delimited JSON-RPC response before returning it to an agent:
+
+```sh
+printf '%s\n' \
+  '{"jsonrpc":"2.0","id":1,"result":{"content":[{"type":"text","text":"safe output"}]}}' |
+  blindfold mcp --direction to-agent --server demo
+```
+
+`to-server` mode rejects SafeRefs because the CLI preview does not yet connect the MCP
+resolver to a configured vault/policy scope:
+
+```sh
+blindfold mcp --direction to-server --server demo < request.jsonl
+```
+
+The underlying library supports injected field-level resolver policies. Only
+newline-delimited stdio JSON-RPC is in scope; MCP HTTP/network transports are not.
+
+## TypeScript SDK Preview
+
+The dependency-free preview lives in [`sdk/typescript`](sdk/typescript):
+
+```sh
+cd sdk/typescript
+npm test
+```
+
+It tokenizes application text before an LLM call and restores PII only for an
+`end_user` destination. Secret restoration to LLM, log, or memory destinations is
+always denied.
+
+## Guarantees and Limitations
+
+Within a supported managed path, Blindfold is designed to:
+
+- redact detected raw values before managed LLM or agent output;
+- avoid intentionally logging raw values;
+- restore vault values only after explicit scope and policy checks;
+- fail closed on malformed security-sensitive input; and
+- accurately report degraded controls.
+
+Blindfold does not protect:
+
+- direct calls, reads, or commands that bypass it;
+- a compromised OS or user account;
+- a malicious approved child process;
+- every unknown, encrypted, or transformed secret;
+- memory scraping or side channels; or
+- Windows.
+
+Read [Guarantees](docs/guarantees.md), [Threat Model](THREAT_MODEL.md), and
+[Claude Code limitations](docs/claude-code.md) before using Blindfold.
 
 ## Development
 
-The repository uses Rust 1.96.0 and edition 2024.
-
 ```sh
-cargo build --workspace
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets --all-features -- -D warnings
-cargo test --workspace --all-features
-```
-
-Supply-chain and secret checks:
-
-```sh
+cargo test --workspace --all-targets --all-features
 cargo audit
 cargo deny check
-gitleaks detect --source . --config .github/gitleaks.toml --redact
 ```
 
-See [Development](docs/development.md) for prerequisites, fixture rules, and the full
-validation sequence.
-
-## Documentation
-
-- [Architecture](docs/architecture.md)
-- [Guarantees and limitations](docs/guarantees.md)
-- [Threat model](THREAT_MODEL.md)
-- [Policy model](docs/policy.md)
-- [Claude Code boundary](docs/claude-code.md)
-- [Development guide](docs/development.md)
-- [Release policy](docs/release-policy.md)
-- [Architecture decisions](docs/decisions/README.md)
+See [Development](docs/development.md), [Architecture](docs/architecture.md), and
+[Contributing](CONTRIBUTING.md).
 
 ## Security
 
-Do not open a public issue for a suspected vulnerability or include real credentials in
-a report. Use the repository's private vulnerability reporting flow described in
-[SECURITY.md](SECURITY.md).
-
-## Contributing
-
-Read [CONTRIBUTING.md](CONTRIBUTING.md). Security-sensitive changes require negative
-tests showing that raw fixture values do not reach output or artifacts.
+Do not include real credentials in issues, fixtures, logs, or vulnerability reports.
+Follow [SECURITY.md](SECURITY.md) for private reporting.
 
 ## License
 
-Licensed under the Apache License, Version 2.0. See [LICENSE](LICENSE).
+Apache License 2.0. See [LICENSE](LICENSE).

@@ -2,8 +2,9 @@
 
 ## Status
 
-This is the target architecture for `v0.1.0`. The repository is currently a foundation
-skeleton and does not yet provide the described protection.
+The detector, policy, portable encrypted vault, execution runtime, application proxy,
+diff scanner, and stdio MCP preview are implemented. OS keychain adapters, strict
+sandboxing, and production-grade agent wrappers remain incomplete.
 
 ## Components
 
@@ -61,12 +62,12 @@ The operating system and user account are prerequisites, not boundaries Blindfol
 defend. Direct traffic, reads, or commands outside the wrapper/proxy/broker remain
 outside the managed boundary.
 
-## Storage Direction
+## Storage
 
-The planned vault uses authenticated encrypted records in a local database. A random
-master key is stored or wrapped by macOS Keychain or a Linux Secret Service provider;
-the key is not stored beside ciphertext. See
-[ADR 0002](decisions/0002-vault-backend.md).
+The current portable vault stores authenticated XChaCha20-Poly1305 encrypted records in
+an atomically replaced local file. Its 32-byte master key is supplied by the caller and
+is not stored beside ciphertext. macOS Keychain and Linux Secret Service adapters remain
+future work. See [ADR 0002](decisions/0002-vault-backend.md).
 
 ## SafeRefs
 

@@ -1,6 +1,6 @@
 # ADR 0002: Vault Backend Direction
 
-- Status: Accepted direction; implementation spike required
+- Status: Portable encrypted-file implementation accepted; OS adapter spike required
 - Date: 2026-06-11
 
 ## Context
@@ -12,15 +12,15 @@ does not provide a meaningful boundary.
 
 ## Decision
 
-Use a local authenticated-encrypted record store, expected to be SQLite, with a random
-master key stored or wrapped by:
+The first implementation uses a local authenticated-encrypted file store with atomic
+replacement and a caller-supplied random master key. The planned production adapters
+will store or wrap that key with:
 
 - macOS Keychain on macOS; and
 - a Secret Service implementation on Linux.
 
-The database stores ciphertext and safe metadata only. The master key is never stored in
-the database directory. Unavailable or locked key services, corrupt records, wrong keys,
-or unsupported platforms fail closed.
+The vault file stores ciphertext and safe metadata only. The master key is never stored
+in the vault directory by Blindfold. Corrupt records and wrong keys fail closed.
 
 Use established authenticated-encryption and key-derivation crates or OS primitives. Do
 not implement cryptographic algorithms. The implementation spike must confirm crate
@@ -30,8 +30,8 @@ headless Linux operation before this direction becomes final.
 ## Consequences
 
 This supports structured expiry and audit-safe metadata while keeping key material
-separate. It adds OS integration and SQLite dependencies and requires platform-specific
-testing.
+separate. Until OS adapters exist, callers must supply the key out of band and production
+use is not recommended.
 
 Encrypted database files may remain in backups after deletion. Blindfold can delete
 local records and key references but cannot guarantee erasure from external backups.

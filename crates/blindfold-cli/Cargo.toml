@@ -13,6 +13,13 @@ path = "src/main.rs"
 
 [dependencies]
 blindfold-core = { path = "../blindfold-core" }
+blindfold-detectors = { path = "../blindfold-detectors" }
+blindfold-diff = { path = "../blindfold-diff" }
+blindfold-exec = { path = "../blindfold-exec" }
+blindfold-mcp = { path = "../blindfold-mcp" }
+blindfold-policy = { path = "../blindfold-policy" }
+blindfold-proxy = { path = "../blindfold-proxy" }
+blindfold-vault = { path = "../blindfold-vault" }
 clap = { version = "4.6.1", default-features = false, features = [
     "error-context",
     "help",
@@ -23,6 +30,14 @@ serde = { version = "1.0.228", features = ["derive"] }
 serde-saphyr = { version = "0.0.27", default-features = false, features = [
     "deserialize",
 ] }
+serde_json = "1.0.150"
+tokio = { version = "1.52.3", default-features = false, features = [
+    "macros",
+    "process",
+    "rt-multi-thread",
+    "signal",
+] }
+tokio-util = { version = "0.7.18", default-features = false, features = ["rt"] }
 
 [lints]
 workspace = true
