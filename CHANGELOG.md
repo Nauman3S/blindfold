@@ -10,6 +10,7 @@ project follows Semantic Versioning as described in
 
 ### Added
 
+- A task-oriented `USE_CASES.md` beginner guide with copy-paste workflows.
 - Zero-persistence wrappers for Claude Code, Codex CLI, and OpenCode.
 - `blindfold shell-init` and visible per-invocation wrapper opt-out support.
 - Secret detectors, redaction modes, bounded repository scanning, and safe reports.

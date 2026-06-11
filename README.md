@@ -9,13 +9,17 @@ traffic, and records safe metadata without intentionally logging raw values.
 Blindfold protects only operations routed through Blindfold. It is not an OS sandbox,
 network firewall, or guarantee that every unknown secret format will be detected.
 
+**New here? Start with [Simple Use Cases](USE_CASES.md).** It explains the common
+commands without requiring you to understand the full architecture.
+
 ## Status
 
 This repository is pre-release software:
 
 - **Implemented:** scanning, redaction, policy evaluation, encrypted local vault,
   sanitized command execution, OpenAI/Anthropic application proxy, diff scanning.
-- **Preview:** Claude wrapper, MCP stdio transformer, TypeScript SDK.
+- **Preview:** Claude, Codex, and OpenCode wrappers; MCP stdio transformer; TypeScript
+  SDK.
 - **Not implemented:** OS keychain adapter, transparent network interception, filesystem
   sandbox, MCP network transports, Windows support.
 
@@ -44,12 +48,10 @@ blindfold --help
 ```sh
 blindfold init
 blindfold doctor
-blindfold scan .
-blindfold redact .env
+blindfold run codex
 ```
 
-`scan` exits with code `2` when it finds sensitive content. Findings contain locations
-and categories, not matched values.
+Common tasks and copy-paste examples are in [USE_CASES.md](USE_CASES.md).
 
 ## Scan Files and Directories
 
