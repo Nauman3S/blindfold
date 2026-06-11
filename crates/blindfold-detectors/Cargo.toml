@@ -1,0 +1,18 @@
+[package]
+name = "blindfold-detectors"
+description = "Secret detection, redaction, and bounded filesystem scanning for Blindfold"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+regex = { version = "1.12.4", default-features = false, features = [
+    "perf",
+    "std",
+    "unicode-perl",
+] }
+
+[lints]
+workspace = true

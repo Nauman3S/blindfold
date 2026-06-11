@@ -1,0 +1,25 @@
+[package]
+name = "blindfold-vault"
+description = "Portable encrypted vault and safe audit foundation for Blindfold"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+atomic-write-file = "0.3.0"
+blindfold-core = { path = "../blindfold-core" }
+chacha20poly1305 = { version = "0.10.1", default-features = false, features = [
+    "alloc",
+] }
+getrandom = "0.4.2"
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.150"
+zeroize = "1.8.2"
+
+[dev-dependencies]
+tempfile = "3.23.0"
+
+[lints]
+workspace = true

@@ -1,0 +1,3 @@
+2026-01-01T00:00:00Z INFO fixture=BLINDFOLD_FAKE_FIXTURE starting test command
+2026-01-01T00:00:01Z ERROR request failed authorization="Bearer BLINDFOLD_FAKE_FIXTURE_00000000000000000000"
+2026-01-01T00:00:01Z DEBUG database=postgresql://blindfold_fake:BLINDFOLD_FAKE_FIXTURE@127.0.0.1:55432/blindfold_test

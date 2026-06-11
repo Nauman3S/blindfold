@@ -1,0 +1,40 @@
+name: Security boundary clarification
+description: Report unclear protected, degraded, or unprotected behavior without disclosing a vulnerability.
+title: "[Boundary]: "
+labels:
+  - documentation
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Do not disclose vulnerabilities or real credentials here. Use private vulnerability reporting as described in SECURITY.md.
+  - type: input
+    id: version
+    attributes:
+      label: Version or commit
+    validations:
+      required: true
+  - type: dropdown
+    id: platform
+    attributes:
+      label: Platform
+      options:
+        - macOS
+        - Linux
+        - Windows (unsupported for v0.1.0)
+        - Other
+    validations:
+      required: true
+  - type: textarea
+    id: path
+    attributes:
+      label: Managed path
+      description: Describe the integration, command, or traffic path using fake values only.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected boundary description
+    validations:
+      required: true

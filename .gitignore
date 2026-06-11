@@ -1,0 +1,7 @@
+plan.md
+temp/
+target/
+*.profraw
+*.profdata
+.DS_Store
+.blindfold.local.yaml

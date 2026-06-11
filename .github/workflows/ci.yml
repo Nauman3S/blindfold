@@ -1,0 +1,73 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: "0"
+
+jobs:
+  quality:
+    name: Format and Clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust 1.96.0
+        run: rustup toolchain install 1.96.0 --profile minimal --component rustfmt,clippy
+      - name: Check formatting
+        run: cargo +1.96.0 fmt --all -- --check
+      - name: Run Clippy
+        run: cargo +1.96.0 clippy --workspace --all-targets --all-features -- -D warnings
+
+  test:
+    name: Test (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-latest
+          - macos-latest
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust 1.96.0
+        run: rustup toolchain install 1.96.0 --profile minimal
+      - name: Run tests
+        run: cargo +1.96.0 test --workspace --all-features
+
+  supply-chain:
+    name: Dependency Policy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust 1.96.0
+        run: rustup toolchain install 1.96.0 --profile minimal
+      - name: Install audit tools
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-audit,cargo-deny
+      - name: Resolve dependencies
+        run: cargo +1.96.0 generate-lockfile
+      - name: Check RustSec advisories
+        run: cargo audit
+      - name: Check licenses, sources, and duplicates
+        run: cargo deny check
+
+  secrets:
+    name: Secret Scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Scan repository
+        uses: docker://zricethezav/gitleaks:v8.24.3
+        with:
+          args: detect --source=/github/workspace --config=/github/workspace/.github/gitleaks.toml --redact --no-banner --verbose

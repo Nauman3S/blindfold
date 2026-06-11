@@ -1,0 +1,28 @@
+[package]
+name = "blindfold-cli"
+description = "Command-line interface for Blindfold"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "blindfold"
+path = "src/main.rs"
+
+[dependencies]
+blindfold-core = { path = "../blindfold-core" }
+clap = { version = "4.6.1", default-features = false, features = [
+    "error-context",
+    "help",
+    "std",
+    "usage",
+] }
+serde = { version = "1.0.228", features = ["derive"] }
+serde-saphyr = { version = "0.0.27", default-features = false, features = [
+    "deserialize",
+] }
+
+[lints]
+workspace = true

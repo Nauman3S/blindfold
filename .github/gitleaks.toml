@@ -1,0 +1,11 @@
+title = "Blindfold Gitleaks configuration"
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Synthetic detector inputs and generated Rust build output"
+paths = [
+  '''(^|/)tests/fixtures/''',
+  '''(^|/)target/''',
+]
