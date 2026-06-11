@@ -148,12 +148,11 @@ struct ContextualDetector {
 
 impl ContextualDetector {
     fn new() -> Result<Self, BuildError> {
-        let assignment = Regex::new(
-            r#"(?m)(?:^|[,{;\s])([A-Za-z][-A-Za-z0-9_.]{1,63})[ \t]*(?:=|:)[ \t]*["']?([-A-Za-z0-9+/_.~=]{16,512})"#,
-        )
-        .map_err(|_| BuildError {
-            detector: "context.assignment",
-        })?;
+        let assignment =
+            Regex::new(r"(?m)(?:^|[,{;\s])([A-Za-z][-A-Za-z0-9_.]{1,63})[ \t]*(?:=|:)[ \t]*")
+                .map_err(|_| BuildError {
+                    detector: "context.assignment",
+                })?;
         Ok(Self { assignment })
     }
 }
@@ -161,7 +160,7 @@ impl ContextualDetector {
 impl Detector for ContextualDetector {
     fn detect(&self, input: &str, findings: &mut Vec<Finding>) {
         for captures in self.assignment.captures_iter(input) {
-            let (Some(name), Some(value)) = (captures.get(1), captures.get(2)) else {
+            let (Some(assignment), Some(name)) = (captures.get(0), captures.get(1)) else {
                 continue;
             };
             let normalized = name.as_str().to_ascii_lowercase();
@@ -170,19 +169,57 @@ impl Detector for ContextualDetector {
                 continue;
             };
 
-            let candidate = value.as_str();
+            let Some((start, end)) = assignment_value_span(input, assignment.end()) else {
+                continue;
+            };
+            let Some(candidate) = input.get(start..end) else {
+                continue;
+            };
+            if candidate.len() > 512 {
+                continue;
+            }
             if candidate.len() < minimum_context_length(kind)
                 || !has_character_variety(candidate)
                 || shannon_entropy(candidate) < 3.5
             {
                 continue;
             }
-            let Ok(span) = Span::new(value.start(), value.end()) else {
+            let Ok(span) = Span::new(start, end) else {
                 continue;
             };
             findings.push(Finding::new(kind, span, confidence, "context.assignment"));
         }
     }
+}
+
+fn assignment_value_span(input: &str, start: usize) -> Option<(usize, usize)> {
+    let suffix = input.get(start..)?;
+    let first = suffix.chars().next()?;
+    if matches!(first, '"' | '\'') {
+        let content_start = start + first.len_utf8();
+        let mut escaped = false;
+        for (offset, character) in input.get(content_start..)?.char_indices() {
+            if escaped {
+                escaped = false;
+            } else if character == '\\' {
+                escaped = true;
+            } else if character == first {
+                return (offset > 0).then_some((content_start, content_start + offset));
+            } else if matches!(character, '\r' | '\n') {
+                return None;
+            }
+        }
+        return None;
+    }
+
+    let end = suffix
+        .char_indices()
+        .find_map(|(offset, character)| {
+            (character.is_ascii_whitespace() || matches!(character, ',' | ';' | '}' | ']'))
+                .then_some(start + offset)
+        })
+        .unwrap_or(input.len());
+    (end > start).then_some((start, end))
 }
 
 fn classify_context(name: &str) -> Option<(SecretKind, Confidence)> {
@@ -409,6 +446,25 @@ mod tests {
                 .detect("password=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn contextual_values_cover_complete_quoted_punctuation() {
+        let input = r#"password="Long! Password$ Value_1234""#;
+        let findings = detectors().detect(input);
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].kind(), SecretKind::Password);
+        assert_eq!(
+            &input[findings[0].span().as_range()],
+            "Long! Password$ Value_1234"
+        );
+    }
+
+    #[test]
+    fn oversized_contextual_values_are_not_partially_redacted() {
+        let value = format!("Aa1!{}", "z".repeat(600));
+        let input = format!("password=\"{value}\"");
+        assert!(detectors().detect(&input).is_empty());
     }
 
     #[test]

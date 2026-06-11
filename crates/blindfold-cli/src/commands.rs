@@ -1,12 +1,13 @@
 use std::env;
 use std::fs;
-use std::io::{self, Read};
+use std::io::{self, Read, Write};
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::Arc;
 use std::time::Duration;
 
+use atomic_write_file::AtomicWriteFile;
 use blindfold_core::{
     Destination, SafeRef, SafeRefKind, SecretKind as CoreSecretKind, SecretValue, Sensitivity,
 };
@@ -86,6 +87,20 @@ fn cli() -> Command {
                 .about("Redact a file or standard input")
                 .arg(Arg::new("file").value_name("FILE"))
                 .arg(
+                    Arg::new("output")
+                        .long("output")
+                        .short('o')
+                        .value_name("FILE")
+                        .help("Write redacted content to a new file instead of stdout"),
+                )
+                .arg(
+                    Arg::new("force")
+                        .long("force")
+                        .help("Allow --output to replace an existing file")
+                        .requires("output")
+                        .action(ArgAction::SetTrue),
+                )
+                .arg(
                     Arg::new("mode")
                         .long("mode")
                         .default_value("placeholder")
@@ -159,8 +174,18 @@ fn cli() -> Command {
         .subcommand(
             Command::new("diff-check")
                 .about("Scan added lines in a patch or Git diff")
-                .arg(Arg::new("patch").long("patch").value_name("FILE"))
-                .arg(Arg::new("staged").long("staged").action(ArgAction::SetTrue))
+                .arg(
+                    Arg::new("patch")
+                        .long("patch")
+                        .value_name("FILE")
+                        .conflicts_with("staged"),
+                )
+                .arg(
+                    Arg::new("staged")
+                        .long("staged")
+                        .action(ArgAction::SetTrue)
+                        .conflicts_with("patch"),
+                )
                 .arg(Arg::new("json").long("json").action(ArgAction::SetTrue)),
         )
         .subcommand(
@@ -169,10 +194,22 @@ fn cli() -> Command {
                 .subcommand(
                     Command::new("put-env")
                         .arg(Arg::new("name").required(true))
-                        .arg(Arg::new("ttl").long("ttl-seconds").default_value("3600")),
+                        .arg(
+                            Arg::new("ttl")
+                                .long("ttl-seconds")
+                                .default_value("3600")
+                                .value_parser(clap::value_parser!(u64).range(1..)),
+                        ),
                 )
                 .subcommand(Command::new("list"))
-                .subcommand(Command::new("clear")),
+                .subcommand(
+                    Command::new("clear").arg(
+                        Arg::new("yes")
+                            .long("yes")
+                            .help("Confirm deletion of all records in this scope")
+                            .action(ArgAction::SetTrue),
+                    ),
+                ),
         )
         .subcommand(Command::new("audit").about("Print safe local audit JSON lines"))
         .subcommand(
@@ -297,12 +334,29 @@ fn scan_command(args: &ArgMatches) -> ExitCode {
             report.files_considered(),
             report.files().len()
         );
+        println!(
+            "Completeness: complete={} skipped_binary={} skipped_too_large={} \
+             skipped_ignored={} skipped_symlinks={} io_errors={} limit_reached={}.",
+            !scan_is_incomplete(&report),
+            report.skipped_binary(),
+            report.skipped_too_large(),
+            report.skipped_ignored(),
+            report.skipped_symlinks(),
+            report.io_errors(),
+            report.limit_reached()
+        );
     }
-    if report.files().is_empty() {
+    if scan_is_incomplete(&report) {
+        ExitCode::from(3)
+    } else if report.files().is_empty() {
         ExitCode::SUCCESS
     } else {
         ExitCode::from(2)
     }
+}
+
+fn scan_is_incomplete(report: &blindfold_detectors::ScanReport) -> bool {
+    report.skipped_too_large() > 0 || report.io_errors() > 0 || report.limit_reached()
 }
 
 fn print_scan_json(report: &blindfold_detectors::ScanReport) {
@@ -328,6 +382,15 @@ fn print_scan_json(report: &blindfold_detectors::ScanReport) {
             "schema_version": 1,
             "files_considered": report.files_considered(),
             "bytes_read": report.bytes_read(),
+            "complete": !scan_is_incomplete(report),
+            "skipped": {
+                "binary": report.skipped_binary(),
+                "too_large": report.skipped_too_large(),
+                "ignored": report.skipped_ignored(),
+                "symlinks": report.skipped_symlinks(),
+            },
+            "io_errors": report.io_errors(),
+            "limit_reached": report.limit_reached(),
             "findings": findings,
         })
     );
@@ -364,11 +427,58 @@ fn redact_command(args: &ArgMatches) -> ExitCode {
     );
     match redactor.redact(&input, options) {
         Ok(output) => {
-            print!("{}", output.text());
-            ExitCode::SUCCESS
+            if let Some(path) = args.get_one::<String>("output") {
+                write_redacted_output(Path::new(path), output.text(), args.get_flag("force"))
+            } else {
+                print!("{}", output.text());
+                ExitCode::SUCCESS
+            }
         }
         Err(error) => fail(&error.to_string()),
     }
+}
+
+fn write_redacted_output(path: &Path, contents: &str, force: bool) -> ExitCode {
+    if force {
+        let mut file = match AtomicWriteFile::open(path) {
+            Ok(file) => file,
+            Err(error) => {
+                return fail(&format!("could not create output file: {}", error.kind()));
+            }
+        };
+        if let Err(error) = file
+            .write_all(contents.as_bytes())
+            .and_then(|()| file.commit())
+        {
+            return fail(&format!("could not write output file: {}", error.kind()));
+        }
+        eprintln!(
+            "Blindfold atomically replaced {} with redacted content.",
+            path.to_string_lossy()
+        );
+        return ExitCode::SUCCESS;
+    }
+
+    let mut options = fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    let mut file = match options.open(path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+            return fail("output file already exists; choose another path or pass --force");
+        }
+        Err(error) => return fail(&format!("could not create output file: {}", error.kind())),
+    };
+    if let Err(error) = file
+        .write_all(contents.as_bytes())
+        .and_then(|()| file.sync_all())
+    {
+        return fail(&format!("could not write output file: {}", error.kind()));
+    }
+    eprintln!(
+        "Blindfold wrote redacted content to {}.",
+        path.to_string_lossy()
+    );
+    ExitCode::SUCCESS
 }
 
 fn exec_command(args: &ArgMatches) -> ExitCode {
@@ -508,10 +618,7 @@ fn vault_command(root: &Path, args: &ArgMatches) -> ExitCode {
             let Ok(value) = env::var(name) else {
                 return fail("environment value is unavailable");
             };
-            let ttl = put
-                .get_one::<String>("ttl")
-                .and_then(|value| value.parse::<u64>().ok())
-                .unwrap_or(3600);
+            let ttl = put.get_one::<u64>("ttl").copied().unwrap_or(3600);
             match vault.store(
                 SafeRefKind::Environment,
                 &scope,
@@ -540,6 +647,9 @@ fn vault_command(root: &Path, args: &ArgMatches) -> ExitCode {
             }
             Err(error) => fail(&error.to_string()),
         },
+        Some(("clear", clear)) if !clear.get_flag("yes") => {
+            fail("vault clear is destructive; pass --yes to confirm this working-directory scope")
+        }
         Some(("clear", _)) => match vault.clear(&scope) {
             Ok(count) => {
                 println!("Removed {count} scoped vault entries.");

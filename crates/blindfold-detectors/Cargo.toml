@@ -8,6 +8,8 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+blake3 = { version = "1.8.5", default-features = false, features = ["std"] }
+getrandom = "0.4.2"
 regex = { version = "1.12.4", default-features = false, features = [
     "perf",
     "std",

@@ -535,9 +535,11 @@ const fn elevate(severity: Severity, risk: PathRisk) -> Severity {
 
 fn detect_builtin(line: AddedLine<'_>) -> Option<Detection> {
     let content = line.content.trim();
-    if content.is_empty() || content.contains("{{BLINDFOLD:v1:") {
+    if content.is_empty() {
         return None;
     }
+    let masked = mask_safe_refs(content);
+    let content = masked.as_str();
     if let Some(column) = find_ascii_case_insensitive(content, "-----begin private key-----") {
         return Some(Detection::new(
             "BF-DIFF-PRIVATE-KEY",
@@ -600,6 +602,25 @@ fn detect_builtin(line: AddedLine<'_>) -> Option<Detection> {
     None
 }
 
+fn mask_safe_refs(content: &str) -> String {
+    const PREFIX: &str = "{{BLINDFOLD:v1:";
+    let mut masked = content.to_owned();
+    let mut cursor = 0;
+    while let Some(relative_start) = content[cursor..].find(PREFIX) {
+        let start = cursor + relative_start;
+        let Some(relative_end) = content[start..].find("}}") else {
+            break;
+        };
+        let end = start + relative_end + 2;
+        let candidate = &content[start..end];
+        if SafeRef::parse(candidate).is_ok() {
+            masked.replace_range(start..end, &" ".repeat(end - start));
+        }
+        cursor = end;
+    }
+    masked
+}
+
 fn credential_assignment(content: &str) -> Option<(usize, &str)> {
     let separator = content.find('=').or_else(|| content.find(':'))?;
     let name = content[..separator]
@@ -655,8 +676,12 @@ fn is_placeholder(value: &str) -> bool {
     }
     [
         "example",
+        "examplekey",
+        "fakeexamplekey",
         "placeholder",
+        "placeholdervalue",
         "dummy",
+        "dummyvalue",
         "fake",
         "sample",
         "changeme",
@@ -666,7 +691,7 @@ fn is_placeholder(value: &str) -> bool {
         "testonly",
     ]
     .iter()
-    .any(|marker| normalized.contains(marker))
+    .any(|marker| normalized == *marker)
         || normalized
             .chars()
             .all(|character| matches!(character, 'x' | '0'))
@@ -766,3 +791,4 @@ fn escape_json(output: &mut String, value: &str) {
         }
     }
 }
+use blindfold_core::SafeRef;

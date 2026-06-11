@@ -190,6 +190,101 @@ fn scan_and_redact_never_print_the_raw_value() -> Result<(), Box<dyn Error>> {
 }
 
 #[test]
+fn scan_reports_policy_skips_without_calling_the_scan_incomplete() -> Result<(), Box<dyn Error>> {
+    let directory = TestDirectory::new()?;
+    fs::write(directory.path().join("binary.dat"), b"prefix\0suffix")?;
+
+    let text = blindfold(directory.path(), &["scan", "."])?;
+    assert!(text.status.success());
+    assert!(stdout(&text).contains("complete=true"));
+    assert!(stdout(&text).contains("skipped_binary=1"));
+    assert!(stdout(&text).contains("io_errors=0"));
+    assert!(stdout(&text).contains("limit_reached=false"));
+
+    let json = blindfold(directory.path(), &["scan", ".", "--json"])?;
+    assert!(json.status.success());
+    let report: serde_json::Value = serde_json::from_slice(&json.stdout)?;
+    assert_eq!(report["complete"], true);
+    assert_eq!(report["skipped"]["binary"], 1);
+    assert_eq!(report["skipped"]["too_large"], 0);
+    assert_eq!(report["skipped"]["ignored"], 0);
+    assert_eq!(report["skipped"]["symlinks"], 0);
+    assert_eq!(report["io_errors"], 0);
+    assert_eq!(report["limit_reached"], false);
+    Ok(())
+}
+
+#[test]
+fn incomplete_scan_exit_code_takes_precedence_over_findings() -> Result<(), Box<dyn Error>> {
+    let directory = TestDirectory::new()?;
+    fs::write(
+        directory.path().join("config.txt"),
+        "api_key=sk-proj-abcdefghijklmnopqrstuvwxyz012345\n",
+    )?;
+    fs::File::create(directory.path().join("large.dat"))?.set_len(2 * 1024 * 1024 + 1)?;
+
+    let scan = blindfold(directory.path(), &["scan", ".", "--json"])?;
+    assert_eq!(scan.status.code(), Some(3));
+    let report: serde_json::Value = serde_json::from_slice(&scan.stdout)?;
+    assert_eq!(report["complete"], false);
+    assert_eq!(report["findings"].as_array().map(Vec::len), Some(1));
+    assert_eq!(report["skipped"]["too_large"], 1);
+    Ok(())
+}
+
+#[test]
+fn scan_reports_when_a_hard_limit_stops_traversal() -> Result<(), Box<dyn Error>> {
+    let directory = TestDirectory::new()?;
+    for index in 0..33 {
+        fs::File::create(directory.path().join(format!("{index:02}.dat")))?
+            .set_len(2 * 1024 * 1024)?;
+    }
+
+    let scan = blindfold(directory.path(), &["scan", ".", "--json"])?;
+    assert_eq!(scan.status.code(), Some(3));
+    let report: serde_json::Value = serde_json::from_slice(&scan.stdout)?;
+    assert_eq!(report["complete"], false);
+    assert_eq!(report["limit_reached"], true);
+    Ok(())
+}
+
+#[test]
+fn redact_output_refuses_overwrite_without_force() -> Result<(), Box<dyn Error>> {
+    let directory = TestDirectory::new()?;
+    let raw = "sk-proj-abcdefghijklmnopqrstuvwxyz012345";
+    fs::write(directory.path().join("input.txt"), raw)?;
+
+    let first = blindfold(
+        directory.path(),
+        &["redact", "input.txt", "--output", "safe.txt"],
+    )?;
+    assert!(first.status.success(), "{}", stderr(&first));
+    let safe = fs::read_to_string(directory.path().join("safe.txt"))?;
+    assert!(!safe.contains(raw));
+    assert!(safe.contains("[REDACTED:openai_api_key]"));
+
+    fs::write(directory.path().join("safe.txt"), "keep-me")?;
+    let refused = blindfold(
+        directory.path(),
+        &["redact", "input.txt", "--output", "safe.txt"],
+    )?;
+    assert!(!refused.status.success());
+    assert!(stderr(&refused).contains("already exists"));
+    assert_eq!(
+        fs::read_to_string(directory.path().join("safe.txt"))?,
+        "keep-me"
+    );
+
+    let forced = blindfold(
+        directory.path(),
+        &["redact", "input.txt", "--output", "safe.txt", "--force"],
+    )?;
+    assert!(forced.status.success(), "{}", stderr(&forced));
+    assert!(!fs::read_to_string(directory.path().join("safe.txt"))?.contains(raw));
+    Ok(())
+}
+
+#[test]
 fn exec_injects_then_redacts_selected_secret() -> Result<(), Box<dyn Error>> {
     let directory = TestDirectory::new()?;
     let raw = "sk-proj-abcdefghijklmnopqrstuvwxyz012345";
@@ -281,6 +376,32 @@ fn vault_lists_only_safe_references() -> Result<(), Box<dyn Error>> {
     assert!(list.status.success(), "{}", stderr(&list));
     assert!(!stdout(&list).contains(raw));
     assert!(stdout(&list).contains("{{BLINDFOLD:v1:ENV:"));
+    Ok(())
+}
+
+#[test]
+fn destructive_and_ambiguous_cli_inputs_are_rejected() -> Result<(), Box<dyn Error>> {
+    let directory = TestDirectory::new()?;
+    let invalid_ttl = blindfold(
+        directory.path(),
+        &["vault", "put-env", "DEMO_API_KEY", "--ttl-seconds", "nope"],
+    )?;
+    assert!(!invalid_ttl.status.success());
+
+    let key = "11".repeat(32);
+    let clear = Command::new(env!("CARGO_BIN_EXE_blindfold"))
+        .args(["vault", "clear"])
+        .env("BLINDFOLD_MASTER_KEY", key)
+        .current_dir(directory.path())
+        .output()?;
+    assert!(!clear.status.success());
+    assert!(stderr(&clear).contains("--yes"));
+
+    let conflicting_diff = blindfold(
+        directory.path(),
+        &["diff-check", "--patch", "change.diff", "--staged"],
+    )?;
+    assert!(!conflicting_diff.status.success());
     Ok(())
 }
 

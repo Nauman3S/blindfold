@@ -12,6 +12,7 @@ name = "blindfold"
 path = "src/main.rs"
 
 [dependencies]
+atomic-write-file = "0.3.0"
 blindfold-core = { path = "../blindfold-core" }
 blindfold-detectors = { path = "../blindfold-detectors" }
 blindfold-diff = { path = "../blindfold-diff" }

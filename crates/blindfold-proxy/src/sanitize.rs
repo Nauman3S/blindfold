@@ -68,30 +68,33 @@ fn sanitize_openai(value: &mut Value, sanitizer: &dyn Sanitizer) {
 
     for key in ["prompt", "input", "instructions", "output_text"] {
         if let Some(field) = object.get_mut(key) {
-            sanitize_text_value(field, sanitizer);
+            sanitize_textual_leaves(field, sanitizer);
         }
     }
-    for key in ["messages", "choices", "output"] {
+    for key in ["messages", "choices", "output", "tool_calls"] {
         if let Some(Value::Array(items)) = object.get_mut(key) {
             for item in items {
                 sanitize_openai(item, sanitizer);
             }
         }
     }
-    for key in ["message", "delta"] {
+    for key in ["message", "delta", "function", "function_call"] {
         if let Some(field) = object.get_mut(key) {
             sanitize_openai(field, sanitizer);
         }
     }
     if let Some(content) = object.get_mut("content") {
-        sanitize_text_value(content, sanitizer);
+        sanitize_textual_leaves(content, sanitizer);
+    }
+    if let Some(arguments) = object.get_mut("arguments") {
+        sanitize_textual_leaves(arguments, sanitizer);
     }
     if matches!(
         object.get("type").and_then(Value::as_str),
         Some("input_text" | "output_text")
     ) && let Some(text) = object.get_mut("text")
     {
-        sanitize_text_value(text, sanitizer);
+        sanitize_textual_leaves(text, sanitizer);
     }
 }
 
@@ -101,7 +104,7 @@ fn sanitize_anthropic(value: &mut Value, sanitizer: &dyn Sanitizer) {
     };
 
     if let Some(system) = object.get_mut("system") {
-        sanitize_text_value(system, sanitizer);
+        sanitize_textual_leaves(system, sanitizer);
     }
     for key in ["messages", "content"] {
         if let Some(Value::Array(items)) = object.get_mut(key) {
@@ -120,27 +123,36 @@ fn sanitize_anthropic(value: &mut Value, sanitizer: &dyn Sanitizer) {
         Some("text" | "text_delta" | "input_text")
     ) && let Some(text) = object.get_mut("text")
     {
-        sanitize_text_value(text, sanitizer);
+        sanitize_textual_leaves(text, sanitizer);
     }
     if let Some(Value::String(content)) = object.get_mut("content") {
         *content = sanitizer.sanitize(content);
     }
+    if matches!(object.get("type").and_then(Value::as_str), Some("tool_use"))
+        && let Some(input) = object.get_mut("input")
+    {
+        sanitize_textual_leaves(input, sanitizer);
+    }
+    if matches!(
+        object.get("type").and_then(Value::as_str),
+        Some("input_json_delta")
+    ) && let Some(partial_json) = object.get_mut("partial_json")
+    {
+        sanitize_textual_leaves(partial_json, sanitizer);
+    }
 }
 
-fn sanitize_text_value(value: &mut Value, sanitizer: &dyn Sanitizer) {
+fn sanitize_textual_leaves(value: &mut Value, sanitizer: &dyn Sanitizer) {
     match value {
         Value::String(text) => *text = sanitizer.sanitize(text),
         Value::Array(items) => {
             for item in items {
-                match item {
-                    Value::String(text) => *text = sanitizer.sanitize(text),
-                    Value::Object(_) => {
-                        if let Some(text) = item.get_mut("text") {
-                            sanitize_text_value(text, sanitizer);
-                        }
-                    }
-                    _ => {}
-                }
+                sanitize_textual_leaves(item, sanitizer);
+            }
+        }
+        Value::Object(object) => {
+            for field in object.values_mut() {
+                sanitize_textual_leaves(field, sanitizer);
             }
         }
         _ => {}
@@ -207,6 +219,64 @@ mod tests {
         let text = std::str::from_utf8(&output).map_err(|_| "UTF-8")?;
         assert!(!text.contains("raw-secret"));
         assert!(text.contains("[safe]"));
+        Ok(())
+    }
+
+    #[test]
+    fn sanitizes_openai_nested_tool_arguments() -> Result<(), &'static str> {
+        let sanitizer = ExactValueSanitizer::new("raw-secret", "[safe]")?;
+        let mut value = json!({
+            "model": "raw-secret",
+            "messages": [{
+                "role": "assistant",
+                "tool_calls": [{
+                    "type": "function",
+                    "function": {
+                        "name": "lookup",
+                        "arguments": "{\"query\":\"raw-secret\",\"nested\":{\"note\":\"raw-secret\"}}"
+                    }
+                }]
+            }],
+            "output": [{
+                "type": "function_call",
+                "arguments": {"query": "raw-secret", "nested": ["raw-secret"]}
+            }]
+        });
+        sanitize_json(Provider::OpenAi, &mut value, &sanitizer);
+        assert_eq!(value["model"], "raw-secret");
+        assert_eq!(
+            value["messages"][0]["tool_calls"][0]["function"]["arguments"],
+            "{\"query\":\"[safe]\",\"nested\":{\"note\":\"[safe]\"}}"
+        );
+        assert_eq!(value["output"][0]["arguments"]["query"], "[safe]");
+        assert_eq!(value["output"][0]["arguments"]["nested"][0], "[safe]");
+        Ok(())
+    }
+
+    #[test]
+    fn sanitizes_anthropic_tool_input_and_json_delta() -> Result<(), &'static str> {
+        let sanitizer = ExactValueSanitizer::new("raw-secret", "[safe]")?;
+        let mut value = json!({
+            "model": "raw-secret",
+            "content": [{
+                "type": "tool_use",
+                "name": "lookup",
+                "input": {
+                    "query": "raw-secret",
+                    "nested": ["raw-secret", {"note": "raw-secret"}]
+                }
+            }],
+            "delta": {
+                "type": "input_json_delta",
+                "partial_json": "{\"query\":\"raw-secret\"}"
+            }
+        });
+        sanitize_json(Provider::Anthropic, &mut value, &sanitizer);
+        assert_eq!(value["model"], "raw-secret");
+        assert_eq!(value["content"][0]["input"]["query"], "[safe]");
+        assert_eq!(value["content"][0]["input"]["nested"][0], "[safe]");
+        assert_eq!(value["content"][0]["input"]["nested"][1]["note"], "[safe]");
+        assert_eq!(value["delta"]["partial_json"], "{\"query\":\"[safe]\"}");
         Ok(())
     }
 }

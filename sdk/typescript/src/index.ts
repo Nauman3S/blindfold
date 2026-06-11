@@ -1,3 +1,5 @@
+import { randomBytes } from "node:crypto";
+
 export type Destination = "llm" | "end_user" | "log" | "memory" | "tool";
 export type TokenKind = "secret" | "pii";
 
@@ -11,11 +13,16 @@ interface Mapping {
   readonly value: string;
 }
 
+const TOKEN_PATTERN = /\{\{BLINDFOLD:SDK:v1:(SECRET|PII):[0-9a-f]{32}\}\}/g;
+
 export class BlindfoldBoundary {
   readonly #mappings = new Map<string, Mapping>();
-  #sequence = 0;
 
   tokenize(value: string, kind: TokenKind): string {
+    return this.#tokenize(value, kind, value);
+  }
+
+  #tokenize(value: string, kind: TokenKind, source: string): string {
     if (value.length === 0) {
       throw new Error("cannot tokenize an empty value");
     }
@@ -23,30 +30,36 @@ export class BlindfoldBoundary {
     if (existing !== undefined) {
       return existing;
     }
-    this.#sequence += 1;
-    const token = `{{BLINDFOLD:SDK:v1:${kind.toUpperCase()}:${String(this.#sequence).padStart(6, "0")}}}`;
+    const token = this.#createToken(kind, source);
     this.#mappings.set(token, { kind, value });
     return token;
   }
 
   toLLM(input: string, values: ReadonlyArray<{ value: string; kind: TokenKind }>): TokenizedText {
-    let text = input;
+    const orderedValues = values
+      .filter((item) => item.value.length > 0)
+      .map((item, index) => ({ ...item, index }))
+      .sort((left, right) => right.value.length - left.value.length || left.index - right.index);
+    const chunks: string[] = [];
     let replacements = 0;
-    for (const item of values) {
-      if (item.value.length === 0) {
+    let offset = 0;
+    while (offset < input.length) {
+      const item = orderedValues.find((candidate) => input.startsWith(candidate.value, offset));
+      if (item === undefined) {
+        chunks.push(input[offset]);
+        offset += 1;
         continue;
       }
-      const token = this.tokenize(item.value, item.kind);
-      const parts = text.split(item.value);
-      replacements += parts.length - 1;
-      text = parts.join(token);
+      chunks.push(this.#tokenize(item.value, item.kind, input));
+      replacements += 1;
+      offset += item.value.length;
     }
-    return { text, replacements };
+    return { text: chunks.join(""), replacements };
   }
 
   fromLLM(input: string, destination: Destination): string {
     return input.replace(
-      /\{\{BLINDFOLD:SDK:v1:(SECRET|PII):[0-9]{6}\}\}/g,
+      TOKEN_PATTERN,
       (token: string): string => {
         const mapping = this.#mappings.get(token);
         if (mapping === undefined) {
@@ -74,5 +87,24 @@ export class BlindfoldBoundary {
       }
     }
     return undefined;
+  }
+
+  #createToken(kind: TokenKind, source: string): string {
+    for (;;) {
+      const token = `{{BLINDFOLD:SDK:v1:${kind.toUpperCase()}:${randomBytes(16).toString("hex")}}}`;
+      if (source.includes(token) || this.#mappings.has(token)) {
+        continue;
+      }
+      let collidesWithMapping = false;
+      for (const mapping of this.#mappings.values()) {
+        if (mapping.value.includes(token)) {
+          collidesWithMapping = true;
+          break;
+        }
+      }
+      if (!collidesWithMapping) {
+        return token;
+      }
+    }
   }
 }

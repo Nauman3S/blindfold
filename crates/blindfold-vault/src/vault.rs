@@ -12,7 +12,7 @@ use chacha20poly1305::{Key, XChaCha20Poly1305, XNonce};
 use serde::{Deserialize, Serialize};
 use zeroize::Zeroize;
 
-use crate::fs::{open_lock, prepare_parent, restrict_file};
+use crate::fs::{open_lock, prepare_parent, reject_symlink, restrict_file};
 use crate::{VaultError, VaultResult};
 
 const MAGIC: &[u8; 8] = b"BFVAULT1";
@@ -147,6 +147,7 @@ impl Vault {
         let path = path.as_ref().to_path_buf();
         prepare_parent(&path)?;
         let lock_path = adjacent_path(&path, "lock")?;
+        reject_symlink(&path)?;
         restrict_file(&path)?;
         let vault = Self {
             path,
@@ -303,6 +304,7 @@ impl Vault {
     }
 
     fn read_state(&self) -> VaultResult<DiskState> {
+        reject_symlink(&self.path)?;
         let bytes = match fs::read(&self.path) {
             Ok(bytes) => bytes,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
@@ -332,6 +334,7 @@ impl Vault {
     }
 
     fn write_state(&self, state: &DiskState) -> VaultResult<()> {
+        reject_symlink(&self.path)?;
         let plaintext = serde_json::to_vec(state).map_err(|_| VaultError::CorruptOrWrongKey)?;
         let mut nonce = [0_u8; NONCE_LEN];
         getrandom::fill(&mut nonce).map_err(|_| VaultError::RandomnessUnavailable)?;
@@ -360,7 +363,9 @@ impl Vault {
             .map_err(|_| VaultError::StorageUnavailable)?;
         file.write_all(&header)
             .map_err(|_| VaultError::StorageUnavailable)?;
+        reject_symlink(&self.path)?;
         file.commit().map_err(|_| VaultError::StorageUnavailable)?;
+        reject_symlink(&self.path)?;
         restrict_file(&self.path)
     }
 }

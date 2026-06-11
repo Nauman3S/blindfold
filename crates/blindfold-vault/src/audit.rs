@@ -6,7 +6,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use blindfold_core::SafeRef;
 use serde::Serialize;
 
-use crate::fs::{open_lock, prepare_parent, restrict_file, set_file_mode};
+use crate::fs::{
+    PathState, open_lock, prepare_parent, reject_symlink, restrict_file, set_file_mode,
+};
 use crate::{VaultError, VaultResult};
 
 /// Closed set of operations that may be recorded in the safe audit log.
@@ -145,6 +147,7 @@ impl AuditLog {
         let path = path.as_ref().to_path_buf();
         prepare_parent(&path)?;
         let lock_path = adjacent_path(&path, "lock")?;
+        reject_symlink(&path)?;
         drop(open_lock(&lock_path)?);
         restrict_file(&path)?;
         Ok(Self {
@@ -177,7 +180,12 @@ impl AuditLog {
         .map_err(|_| VaultError::StorageUnavailable)?;
 
         let _lock = open_lock(&self.lock_path)?;
-        let current_len = fs::metadata(&self.path).map_or(0, |metadata| metadata.len());
+        let current_len = match reject_symlink(&self.path)? {
+            PathState::Missing => 0,
+            PathState::Present => fs::metadata(&self.path)
+                .map_err(|_| VaultError::StorageUnavailable)?
+                .len(),
+        };
         let line_len = u64::try_from(line.len())
             .ok()
             .and_then(|length| length.checked_add(1))
@@ -189,9 +197,11 @@ impl AuditLog {
         let mut options = OpenOptions::new();
         options.create(true).append(true).read(true);
         set_file_mode(&mut options);
+        reject_symlink(&self.path)?;
         let mut file = options
             .open(&self.path)
             .map_err(|_| VaultError::StorageUnavailable)?;
+        reject_symlink(&self.path)?;
         restrict_file(&self.path)?;
         file.write_all(&line)
             .and_then(|()| file.write_all(b"\n"))
@@ -201,7 +211,8 @@ impl AuditLog {
 
     fn rotate(&self) -> VaultResult<()> {
         let oldest = rotated_path(&self.path, self.rotation.retained_files)?;
-        match fs::remove_file(oldest) {
+        reject_symlink(&oldest)?;
+        match fs::remove_file(&oldest) {
             Ok(()) => {}
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
             Err(_) => return Err(VaultError::StorageUnavailable),
@@ -209,14 +220,18 @@ impl AuditLog {
         for generation in (1..self.rotation.retained_files).rev() {
             let source = rotated_path(&self.path, generation)?;
             let destination = rotated_path(&self.path, generation + 1)?;
-            match fs::rename(source, destination) {
+            reject_symlink(&source)?;
+            reject_symlink(&destination)?;
+            match fs::rename(&source, &destination) {
                 Ok(()) => {}
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
                 Err(_) => return Err(VaultError::StorageUnavailable),
             }
         }
-        fs::rename(&self.path, rotated_path(&self.path, 1)?)
-            .map_err(|_| VaultError::StorageUnavailable)
+        let destination = rotated_path(&self.path, 1)?;
+        reject_symlink(&self.path)?;
+        reject_symlink(&destination)?;
+        fs::rename(&self.path, destination).map_err(|_| VaultError::StorageUnavailable)
     }
 }
 

@@ -31,6 +31,12 @@ use crate::{
 const LOOP_HEADER: HeaderName = HeaderName::from_static("x-blindfold-proxy-hop");
 const LOOP_VALUE: HeaderValue = HeaderValue::from_static("1");
 
+#[derive(Clone, Copy)]
+enum BodySource {
+    Request,
+    Response,
+}
+
 /// A validated proxy configuration and outbound client.
 pub struct Proxy {
     config: Config,
@@ -191,6 +197,7 @@ async fn forward_inner(
     let request_type = content_type(&parts.headers);
     let body = sanitize_body(
         upstream.provider,
+        BodySource::Request,
         request_type,
         &body,
         state.sanitizer.as_ref(),
@@ -217,6 +224,7 @@ async fn forward_inner(
     let body = collect_response(upstream_response, state.max_response_body).await?;
     let body = sanitize_body(
         upstream.provider,
+        BodySource::Response,
         response_type,
         &body,
         state.sanitizer.as_ref(),
@@ -288,6 +296,7 @@ fn reject_oversize_reqwest_length(
 
 fn sanitize_body(
     provider: Provider,
+    source: BodySource,
     content_type: Option<&str>,
     body: &[u8],
     sanitizer: &dyn Sanitizer,
@@ -305,7 +314,10 @@ fn sanitize_body(
         sanitize_json(provider, &mut value, sanitizer);
         return serde_json::to_vec(&value).map_err(|_| ProxyError::new(ErrorCode::InvalidJson));
     }
-    Ok(body.to_vec())
+    Err(ProxyError::new(match source {
+        BodySource::Request => ErrorCode::InvalidRequest,
+        BodySource::Response => ErrorCode::UpstreamFailure,
+    }))
 }
 
 fn content_type(headers: &HeaderMap) -> Option<&str> {

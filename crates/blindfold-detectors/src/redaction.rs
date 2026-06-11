@@ -201,10 +201,16 @@ impl Redactor {
         if options.mode == RedactionMode::Block && !findings.is_empty() {
             return Err(RedactionError::Blocked);
         }
+        let surrogate_key = if options.mode == RedactionMode::Surrogate && !findings.is_empty() {
+            let mut key = [0_u8; 32];
+            getrandom::fill(&mut key).map_err(|_| RedactionError::RandomnessUnavailable)?;
+            Some(key)
+        } else {
+            None
+        };
 
         let mut output = String::with_capacity(input.len());
         let mut cursor = 0;
-        let mut surrogates: HashMap<String, usize> = HashMap::new();
         for finding in &findings {
             let span = finding.span();
             let Some(prefix) = input.get(cursor..span.start()) else {
@@ -214,7 +220,7 @@ impl Redactor {
                 return Err(RedactionError::InvalidSpan);
             };
             output.push_str(prefix);
-            write_replacement(&mut output, raw, *finding, options, &mut surrogates);
+            write_replacement(&mut output, raw, *finding, options, surrogate_key.as_ref());
             cursor = span.end();
         }
         let Some(suffix) = input.get(cursor..) else {
@@ -233,7 +239,7 @@ fn write_replacement(
     raw: &str,
     finding: Finding,
     options: RedactionOptions<'_>,
-    surrogates: &mut HashMap<String, usize>,
+    surrogate_key: Option<&[u8; 32]>,
 ) {
     match options.mode {
         RedactionMode::EnvRef => {
@@ -252,22 +258,26 @@ fn write_replacement(
         }
         RedactionMode::Placeholder => write_placeholder(output, finding.kind()),
         RedactionMode::Surrogate => {
-            let next = surrogates.len() + 1;
-            let index = *surrogates.entry(raw.to_owned()).or_insert(next);
-            output.push_str("{{BLINDFOLD:SURROGATE:");
-            push_padded_index(output, index);
+            let Some(key) = surrogate_key else {
+                return;
+            };
+            let digest = blake3::keyed_hash(key, raw.as_bytes());
+            output.push_str("{{BLINDFOLD:SURROGATE:v1:");
+            output.push_str(finding.kind().label());
+            output.push(':');
+            push_hex(output, &digest.as_bytes()[..12]);
             output.push_str("}}");
         }
         RedactionMode::Block => output.push_str(raw),
     }
 }
 
-fn push_padded_index(output: &mut String, index: usize) {
-    let digits = index.to_string();
-    for _ in digits.len()..4 {
-        output.push('0');
+fn push_hex(output: &mut String, bytes: &[u8]) {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    for byte in bytes {
+        output.push(char::from(HEX[usize::from(byte >> 4)]));
+        output.push(char::from(HEX[usize::from(byte & 0x0f)]));
     }
-    output.push_str(&digits);
 }
 
 fn write_placeholder(output: &mut String, kind: SecretKind) {
@@ -284,6 +294,8 @@ pub enum RedactionError {
     Blocked,
     /// A custom detector returned a span outside the input or UTF-8 boundaries.
     InvalidSpan,
+    /// The operating system could not provide secure randomness for surrogate mode.
+    RandomnessUnavailable,
 }
 
 impl fmt::Display for RedactionError {
@@ -291,6 +303,9 @@ impl fmt::Display for RedactionError {
         formatter.write_str(match self {
             Self::Blocked => "input blocked because sensitive content was detected",
             Self::InvalidSpan => "detector returned an invalid input span",
+            Self::RandomnessUnavailable => {
+                "secure randomness is unavailable for surrogate redaction"
+            }
         })
     }
 }
@@ -320,7 +335,7 @@ mod tests {
     }
 
     #[test]
-    fn supports_all_non_blocking_modes() {
+    fn supports_non_surrogate_non_blocking_modes() {
         let raw = "sk-proj-abcdefghijklmnopqrstuvwxyz012345";
         let catalog = DotenvCatalog::parse(&format!("OPENAI_API_KEY={raw}"));
         let cases = [
@@ -335,10 +350,6 @@ mod tests {
             (
                 RedactionOptions::new(RedactionMode::Placeholder),
                 "[REDACTED:openai_api_key]",
-            ),
-            (
-                RedactionOptions::new(RedactionMode::Surrogate),
-                "{{BLINDFOLD:SURROGATE:0001}}",
             ),
         ];
         for (options, expected) in cases {
@@ -356,10 +367,34 @@ mod tests {
         let output = redactor()
             .redact(&input, RedactionOptions::new(RedactionMode::Surrogate))
             .unwrap_or_else(|error| unreachable!("redaction must succeed: {error}"));
-        assert_eq!(
-            output.text(),
-            "{{BLINDFOLD:SURROGATE:0001}} then {{BLINDFOLD:SURROGATE:0001}}"
-        );
+        let (first, second) = output
+            .text()
+            .split_once(" then ")
+            .unwrap_or_else(|| unreachable!("test output must preserve separator"));
+        assert_eq!(first, second);
+        assert!(first.starts_with("{{BLINDFOLD:SURROGATE:v1:openai_api_key:"));
+        let token = first
+            .strip_prefix("{{BLINDFOLD:SURROGATE:v1:openai_api_key:")
+            .and_then(|value| value.strip_suffix("}}"))
+            .unwrap_or_else(|| unreachable!("surrogate format must be stable"));
+        assert_eq!(token.len(), 24);
+        assert!(token.bytes().all(|byte| byte.is_ascii_hexdigit()));
+        assert!(!first.contains(raw));
+    }
+
+    #[test]
+    fn separate_operations_receive_unlinkable_surrogates() {
+        let raw = "sk-proj-abcdefghijklmnopqrstuvwxyz012345";
+        let first = redactor()
+            .redact(raw, RedactionOptions::new(RedactionMode::Surrogate))
+            .unwrap_or_else(|error| unreachable!("redaction must succeed: {error}"));
+        let second = redactor()
+            .redact(raw, RedactionOptions::new(RedactionMode::Surrogate))
+            .unwrap_or_else(|error| unreachable!("redaction must succeed: {error}"));
+
+        assert_ne!(first.text(), second.text());
+        assert!(!first.text().contains(raw));
+        assert!(!second.text().contains(raw));
     }
 
     #[test]

@@ -63,6 +63,95 @@ async fn fake_upstream_never_receives_raw_openai_value() -> Result<(), Box<dyn s
 }
 
 #[tokio::test]
+async fn sanitizes_nested_openai_tool_arguments_end_to_end()
+-> Result<(), Box<dyn std::error::Error>> {
+    let capture = Capture::default();
+    let response = json_response(&serde_json::json!({
+        "choices": [{
+            "message": {
+                "tool_calls": [{
+                    "type": "function",
+                    "function": {
+                        "name": "lookup",
+                        "arguments": format!("{{\"result\":\"{SECRET}\"}}")
+                    }
+                }]
+            }
+        }]
+    }))?;
+    let (upstream, upstream_stop) = spawn_upstream(capture.clone(), response).await?;
+    let (proxy, proxy_stop) = spawn_proxy(upstream, Provider::OpenAi).await?;
+
+    let response = reqwest::Client::new()
+        .post(format!("{proxy}/openai/v1/chat/completions"))
+        .header(CONTENT_TYPE, "application/json")
+        .body(serde_json::to_vec(&serde_json::json!({
+            "messages": [{
+                "role": "assistant",
+                "tool_calls": [{
+                    "type": "function",
+                    "function": {
+                        "name": "lookup",
+                        "arguments": format!("{{\"query\":\"{SECRET}\"}}")
+                    }
+                }]
+            }]
+        }))?)
+        .send()
+        .await?;
+    let response_text = response.text().await?;
+
+    let captured = capture.bodies.lock().map_err(|_| "capture poisoned")?;
+    assert!(!std::str::from_utf8(&captured[0])?.contains(SECRET));
+    assert!(!response_text.contains(SECRET));
+    assert!(response_text.contains("[REDACTED]"));
+
+    proxy_stop.cancel();
+    let _ = upstream_stop.send(());
+    Ok(())
+}
+
+#[tokio::test]
+async fn sanitizes_anthropic_tool_payloads_end_to_end() -> Result<(), Box<dyn std::error::Error>> {
+    let capture = Capture::default();
+    let response = json_response(&serde_json::json!({
+        "content": [{
+            "type": "tool_use",
+            "name": "lookup",
+            "input": {"result": SECRET, "nested": [{"note": SECRET}]}
+        }]
+    }))?;
+    let (upstream, upstream_stop) = spawn_upstream(capture.clone(), response).await?;
+    let (proxy, proxy_stop) = spawn_proxy(upstream, Provider::Anthropic).await?;
+
+    let response = reqwest::Client::new()
+        .post(format!("{proxy}/anthropic/v1/messages"))
+        .header(CONTENT_TYPE, "application/json")
+        .body(serde_json::to_vec(&serde_json::json!({
+            "messages": [{
+                "role": "user",
+                "content": [{
+                    "type": "tool_use",
+                    "name": "lookup",
+                    "input": {"query": SECRET, "nested": [SECRET]}
+                }]
+            }]
+        }))?)
+        .send()
+        .await?;
+    let response_text = response.text().await?;
+
+    let captured = capture.bodies.lock().map_err(|_| "capture poisoned")?;
+    assert!(!std::str::from_utf8(&captured[0])?.contains(SECRET));
+    assert!(!response_text.contains(SECRET));
+    assert!(response_text.contains("[REDACTED]"));
+
+    proxy_stop.cancel();
+    let _ = upstream_stop.send(());
+    Ok(())
+}
+
+#[tokio::test]
 async fn split_sse_chunks_are_withheld_and_sanitized() -> Result<(), Box<dyn std::error::Error>> {
     let capture = Capture::default();
     let (upstream, upstream_stop) = spawn_upstream(capture, split_sse_response()).await?;
@@ -129,6 +218,92 @@ async fn bounds_chunked_upstream_responses() -> Result<(), Box<dyn std::error::E
         .await?;
     assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
     assert!(response.text().await?.contains("response_too_large"));
+
+    proxy_stop.cancel();
+    let _ = upstream_stop.send(());
+    Ok(())
+}
+
+#[tokio::test]
+async fn rejects_non_empty_unsupported_request_content_type()
+-> Result<(), Box<dyn std::error::Error>> {
+    let capture = Capture::default();
+    let (upstream, upstream_stop) = spawn_upstream(capture.clone(), openai_response()).await?;
+    let (proxy, proxy_stop) = spawn_proxy(upstream, Provider::OpenAi).await?;
+
+    let response = reqwest::Client::new()
+        .post(format!("{proxy}/openai/v1/chat/completions"))
+        .header(CONTENT_TYPE, "text/plain")
+        .body(SECRET)
+        .send()
+        .await?;
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert!(response.text().await?.contains("invalid_request"));
+    assert!(
+        capture
+            .bodies
+            .lock()
+            .map_err(|_| "capture poisoned")?
+            .is_empty()
+    );
+
+    proxy_stop.cancel();
+    let _ = upstream_stop.send(());
+    Ok(())
+}
+
+#[tokio::test]
+async fn rejects_non_empty_unsupported_response_content_type()
+-> Result<(), Box<dyn std::error::Error>> {
+    let capture = Capture::default();
+    let response = Response::builder()
+        .header(CONTENT_TYPE, "text/plain")
+        .body(Body::from(SECRET))?;
+    let (upstream, upstream_stop) = spawn_upstream(capture, response).await?;
+    let (proxy, proxy_stop) = spawn_proxy(upstream, Provider::OpenAi).await?;
+
+    let response = reqwest::Client::new()
+        .post(format!("{proxy}/openai/v1/chat/completions"))
+        .header(CONTENT_TYPE, "application/json")
+        .body("{}")
+        .send()
+        .await?;
+    assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+    let body = response.text().await?;
+    assert!(!body.contains(SECRET));
+    assert!(body.contains("upstream_failure"));
+
+    proxy_stop.cancel();
+    let _ = upstream_stop.send(());
+    Ok(())
+}
+
+#[tokio::test]
+async fn allows_empty_bodies_with_unsupported_content_types()
+-> Result<(), Box<dyn std::error::Error>> {
+    let capture = Capture::default();
+    let response = Response::builder()
+        .header(CONTENT_TYPE, "application/octet-stream")
+        .body(Body::empty())?;
+    let (upstream, upstream_stop) = spawn_upstream(capture.clone(), response).await?;
+    let (proxy, proxy_stop) = spawn_proxy(upstream, Provider::OpenAi).await?;
+
+    let response = reqwest::Client::new()
+        .post(format!("{proxy}/openai/v1/chat/completions"))
+        .header(CONTENT_TYPE, "application/octet-stream")
+        .body(Vec::new())
+        .send()
+        .await?;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert!(response.bytes().await?.is_empty());
+    assert_eq!(
+        capture
+            .bodies
+            .lock()
+            .map_err(|_| "capture poisoned")?
+            .as_slice(),
+        &[Vec::<u8>::new()]
+    );
 
     proxy_stop.cancel();
     let _ = upstream_stop.send(());
@@ -227,6 +402,13 @@ fn openai_response() -> Response<Body> {
             r#"{{"choices":[{{"message":{{"content":"echo {SECRET}"}}}}]}}"#
         )))
         .unwrap_or_else(|_| Response::new(Body::empty()))
+}
+
+fn json_response(value: &serde_json::Value) -> Result<Response<Body>, serde_json::Error> {
+    Ok(Response::builder()
+        .header(CONTENT_TYPE, "application/json")
+        .body(Body::from(serde_json::to_vec(&value)?))
+        .unwrap_or_else(|_| Response::new(Body::empty())))
 }
 
 fn split_sse_response() -> Response<Body> {

@@ -70,6 +70,35 @@ fn accepts_unstaged_like_clean_patch_and_fake_fixture() -> Result<(), Box<dyn st
 }
 
 #[test]
+fn valid_safe_ref_does_not_hide_another_secret_on_the_same_line()
+-> Result<(), Box<dyn std::error::Error>> {
+    let safe_ref = "{{BLINDFOLD:v1:ENV:00112233445566778899aabbccddeeff}}";
+    let patch = single_added_line(
+        "src/config.rs",
+        &format!("reference = \"{safe_ref}\"; api_key = \"{RAW_SECRET}\";"),
+    );
+
+    let report = scan(&patch)?;
+
+    assert_eq!(report.outcome(), ScanOutcome::Findings);
+    assert!(!report.to_text().contains(RAW_SECRET));
+    assert!(!report.to_json().contains(RAW_SECRET));
+    Ok(())
+}
+
+#[test]
+fn placeholder_markers_inside_real_values_do_not_bypass_detection()
+-> Result<(), Box<dyn std::error::Error>> {
+    for marker in ["fake", "sample", "notasecret", "example"] {
+        let value = format!("{marker}-real-looking-password-123456");
+        let patch = single_added_line("src/config.rs", &format!("password = \"{value}\""));
+        let report = scan(&patch)?;
+        assert_eq!(report.outcome(), ScanOutcome::Findings, "{marker}");
+    }
+    Ok(())
+}
+
+#[test]
 fn handles_renames_and_binary_markers() -> Result<(), Box<dyn std::error::Error>> {
     let patch = "diff --git a/old.txt b/new.txt\n\
                  similarity index 100%\n\
