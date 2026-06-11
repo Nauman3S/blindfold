@@ -17,7 +17,7 @@ Install Gitleaks from its maintained release packages. CI uses a pinned containe
 
 ```sh
 cargo build --workspace
-cargo test --workspace --all-features
+cargo test --workspace --all-targets --all-features
 cargo build --workspace --release
 ```
 
@@ -39,6 +39,12 @@ cargo fmt --all
 ```sh
 cargo audit
 cargo deny check
+```
+
+TypeScript SDK preview:
+
+```sh
+npm --prefix sdk/typescript test
 ```
 
 `cargo audit` checks the RustSec advisory database. `cargo deny` enforces advisory,
@@ -95,7 +101,7 @@ Follow [release-policy.md](release-policy.md). At minimum:
 ```sh
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets --all-features -- -D warnings
-cargo test --workspace --all-features
+cargo test --workspace --all-targets --all-features
 cargo build --workspace --release
 cargo audit
 cargo deny check

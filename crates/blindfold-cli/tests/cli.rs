@@ -270,3 +270,22 @@ fn vault_lists_only_safe_references() -> Result<(), Box<dyn Error>> {
     assert!(stdout(&list).contains("{{BLINDFOLD:v1:ENV:"));
     Ok(())
 }
+
+#[test]
+fn strict_claude_preview_refuses_degraded_boundary() -> Result<(), Box<dyn Error>> {
+    let directory = TestDirectory::new()?;
+    let output = blindfold(
+        directory.path(),
+        &[
+            "run",
+            "claude",
+            "--strict",
+            "--anthropic-upstream",
+            "https://api.anthropic.com",
+        ],
+    )?;
+
+    assert!(!output.status.success());
+    assert!(stderr(&output).contains("strict Claude mode is unavailable"));
+    Ok(())
+}

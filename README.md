@@ -321,8 +321,9 @@ Blindfold does not protect:
 - memory scraping or side channels; or
 - Windows.
 
-Read [Guarantees](docs/guarantees.md), [Threat Model](THREAT_MODEL.md), and
-[Claude Code limitations](docs/claude-code.md) before using Blindfold.
+Read [Guarantees](docs/guarantees.md), [Threat Model](THREAT_MODEL.md),
+[Claude Code limitations](docs/claude-code.md), [MCP preview](docs/mcp.md), and
+[SDK preview](docs/sdk.md) before using Blindfold.
 
 ## Development
 

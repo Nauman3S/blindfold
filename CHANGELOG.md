@@ -10,7 +10,15 @@ project follows Semantic Versioning as described in
 
 ### Added
 
-- Phase 0 repository documentation and security contracts.
+- Secret detectors, redaction modes, bounded repository scanning, and safe reports.
+- Destination-aware policy presets and scoped restoration decisions.
+- XChaCha20-Poly1305 local vault with safe audit metadata.
+- Sanitized explicit-secret process execution.
+- Loopback OpenAI-compatible and Anthropic-compatible application proxy.
+- Unified-diff secret scanning.
+- MCP stdio JSON-RPC protection preview.
+- Dependency-free TypeScript application SDK preview.
+- Integrated CLI commands and user-focused README examples.
 - Apache License 2.0.
 - CI checks for formatting, Clippy, tests, dependency policy, vulnerability auditing,
   and secret scanning.
@@ -18,4 +26,4 @@ project follows Semantic Versioning as described in
   managed support boundary.
 - Isolated fake credential fixtures for future security regression tests.
 
-[Unreleased]: https://github.com/blindfold-dev/blindfold/compare/HEAD
+[Unreleased]: https://github.com/Nauman3S/blindfold/compare/HEAD
