@@ -79,15 +79,17 @@ It does not change persistent configuration.
   retained.
 
 The proxy exists only for the child process lifetime and binds to an ephemeral loopback
-port. Authentication continues to use each agent's existing environment or credential
-store.
+port. The child receives an allowlisted environment and does not inherit parent API-key
+variables or unrelated secrets. Authentication must use the agent's persistent
+credential store or login flow. Environment-only provider authentication requires a
+visible `--no-proxy` bypass until a credential broker is implemented.
 
 ## Current Boundary
 
 The wrappers sanitize supported provider JSON and SSE request/response fields. They do
-not currently sanitize interactive terminal output, isolate provider credentials from
-the agent process, or prevent direct filesystem and network access. `--strict` therefore
-refuses to start instead of claiming those controls exist.
+not currently sanitize interactive terminal output, broker provider credentials, or
+prevent direct filesystem and network access. `--strict` therefore refuses to start
+instead of claiming those controls exist.
 
 OpenCode providers other than `openai` and `anthropic` are not routed through Blindfold.
 Managed OpenCode settings may also override runtime configuration; verify organizational

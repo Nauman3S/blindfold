@@ -56,6 +56,10 @@ blindfold run codex -- --sandbox workspace-write
 Blindfold starts a temporary local proxy, launches Codex, and stops the proxy when
 Codex exits. It does not permanently edit Codex configuration.
 
+Managed mode does not pass parent API-key variables or unrelated secrets to Codex.
+Sign in through Codex's persistent credential store first. Use `--no-proxy` only when
+you intentionally need the native environment for one run.
+
 ## Use Case 2: Run Claude or OpenCode
 
 ```sh
@@ -302,11 +306,14 @@ They do not currently:
 - sanitize the interactive terminal display;
 - prevent an agent from directly reading project files;
 - prevent direct network access outside the managed proxy;
-- isolate provider credentials from the agent process; or
+- broker environment-only provider credentials into the proxy; or
 - provide an operating-system sandbox.
 
 `--strict` refuses to start while those controls are unavailable. Blindfold should be
 treated as a managed traffic boundary, not complete agent isolation.
+
+Automatic PII discovery is also not implemented. Do not rely on `scan`, `redact`, the
+proxy, or MCP preview to identify arbitrary names, emails, addresses, or other PII.
 
 ## Getting Help
 

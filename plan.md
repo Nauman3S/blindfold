@@ -45,7 +45,9 @@ Tagline: Let agents use secrets without seeing secrets.
 
 Blindfold is a local-first privacy and secrets boundary for AI coding agents.
 
-It allows Claude Code, Codex, Cursor, MCP tools, and custom agents to work with real projects while preventing raw secrets, .env values, API keys, database URLs, private keys, certificates, and customer PII from reaching LLM prompts, model responses, logs, chat history, or agent-visible tool output.
+It aims to let Claude Code, Codex, Cursor, MCP tools, and custom agents work with real
+projects while reducing disclosure of detected credentials on explicitly managed paths.
+Automatic PII discovery and whole-agent containment are not currently implemented.
 
 The core idea:
 
@@ -1093,7 +1095,8 @@ protection boundary.
 - [!] `P6-05` Protect supported file/tool reads through documented hooks or broker
   integration; do not claim interception where none exists.
 - [~] `P6-06` Detect common bypass conditions such as direct provider configuration,
-  inherited raw secrets, unsupported agent version, or unavailable hooks.
+  unsupported agent version, or unavailable hooks. Managed children now use an
+  environment allowlist; credential brokering and version/hook checks remain.
 - [x] `P6-07` Show startup status listing what is protected, degraded, or unprotected.
 - [x] `P6-08` Add `--strict` startup checks that refuse to run when required protections
   cannot be established.
@@ -1106,6 +1109,7 @@ protection boundary.
 - [~] `blindfold run claude|codex|opencode` launches installed agents and routes
   configured provider traffic; full clean-project provider demos remain.
 - [x] Startup output accurately reports the active boundary.
+- [x] Managed agents do not inherit the vault master key or unrelated parent secrets.
 - [ ] The full demo passes without a raw fixture appearing in agent-visible output or
   fake provider requests.
 - [x] Strict mode refuses known unsafe/degraded configurations.
@@ -1183,6 +1187,8 @@ release.
 - [x] `P9-07` Audit tool identity, requested SafeRefs, policy result, and redaction
   counts.
 - [~] `P9-08` Add a fake MCP server and end-to-end tests.
+- [x] `P9-09` Bound CLI stdio input per JSON-RPC message and reject unresolved
+  plaintext in credential-named tool argument fields.
 
 **Exit criteria:**
 
@@ -1218,7 +1224,8 @@ assumptions, threats, mitigations, residual risks, and out-of-scope threats.
 ### Protected Assets
 
 - Raw credentials, tokens, private keys, certificates, and credential-bearing URLs
-- Customer PII encountered in managed traffic
+- Caller-identified PII supplied to the preview SDK; automatic PII discovery remains
+  outside the implemented detector boundary
 - Vault encryption keys and SafeRef mappings
 - Policy and audit integrity
 - The user's expectation of which paths are protected
@@ -1397,9 +1404,9 @@ test, report, or artifact path when implementation begins.
 | `V-07` | Streaming | Split each fixture at every byte boundary supported by the detector | Every reconstruction is withheld/redacted | TBD |
 | `V-08` | Detector quality | Positive and false-positive corpora | Meets documented recall/false-positive budget | TBD |
 | `V-09` | Structured data | Parse redacted `.env`, JSON, YAML, TOML, and URLs | Output remains valid/useful or is safely blocked | TBD |
-| `V-10` | Vault | Wrong key, corruption, permissions, concurrency, and recovery | Fails closed; no raw output | TBD |
+| `V-10` | Vault | Wrong key, corruption, permissions, concurrency, recovery, and audit read validation | Fails closed; no raw output | `cargo test -p blindfold-vault`; symlink and malformed audit tests |
 | `V-11` | Proxy security | Loopback, upstream allowlist, loop prevention, limits, malformed payloads | Unsafe cases rejected safely | TBD |
-| `V-12` | Exec isolation | Inspect child env and process args | Only approved values present; secret absent from argv | TBD |
+| `V-12` | Exec isolation | Inspect child env and process args | Only approved values present; secret absent from argv | `cargo test -p blindfold-cli managed_wrapper_does_not_inherit_parent_secrets` |
 | `V-13` | Policy | Complete mode/destination/sensitivity matrix | Every case has expected deterministic action | TBD |
 | `V-14` | SafeRef abuse | Forged, malformed, replayed, expired, and cross-project references | No unauthorized restoration | TBD |
 | `V-15` | Performance | Large repository, large file, and high-volume stream benchmarks | Meets recorded budgets without unbounded memory | TBD |
@@ -1469,6 +1476,8 @@ Track these explicitly; unresolved high-impact decisions block the affected phas
 | `R-04` | Risk | Vault/keychain behavior differs significantly by platform | P3 | Open |
 | `R-05` | Risk | Detector false positives make the default workflow unusable | P1 | Open |
 | `R-06` | Risk | Dependencies log or serialize sensitive payloads unexpectedly | P0-P7 | Open |
+| `R-07` | Risk | Automatic PII discovery is absent while older design examples imply it exists | P1/P10 | Open: claims narrowed; scope decision required |
+| `R-08` | Risk | Managed agents using environment-only provider credentials cannot authenticate without bypass | P6 | Open: implement a credential broker |
 
 For each open item, add an owner, target date, decision link, and mitigation when the
 project moves into active implementation.

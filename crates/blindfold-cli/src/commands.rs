@@ -1,6 +1,6 @@
 use std::env;
 use std::fs;
-use std::io::{self, Read, Write};
+use std::io::{self, BufRead, Read, Write};
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -664,16 +664,26 @@ fn vault_command(root: &Path, args: &ArgMatches) -> ExitCode {
 
 fn audit_command(root: &Path) -> ExitCode {
     let path = root.join(".blindfold/audit.jsonl");
-    match fs::read_to_string(path) {
-        Ok(contents) => {
-            print!("{contents}");
-            ExitCode::SUCCESS
-        }
-        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+    let rotation = match RotationPolicy::new(1024 * 1024, 5) {
+        Ok(rotation) => rotation,
+        Err(error) => return fail(&error.to_string()),
+    };
+    let audit = match AuditLog::open(path, rotation) {
+        Ok(audit) => audit,
+        Err(error) => return fail(&format!("could not open audit log: {error}")),
+    };
+    match audit.read_lines() {
+        Ok(lines) if lines.is_empty() => {
             println!("No audit events recorded.");
             ExitCode::SUCCESS
         }
-        Err(error) => fail(&format!("could not read audit log: {}", error.kind())),
+        Ok(lines) => {
+            for line in lines {
+                println!("{line}");
+            }
+            ExitCode::SUCCESS
+        }
+        Err(error) => fail(&format!("could not read audit log: {error}")),
     }
 }
 
@@ -733,15 +743,12 @@ async fn proxy_command(args: &ArgMatches) -> ExitCode {
 }
 
 fn mcp_command(args: &ArgMatches) -> ExitCode {
-    let mut input = String::new();
-    if let Err(error) = io::stdin().read_to_string(&mut input) {
-        return fail(&format!("could not read MCP message: {}", error.kind()));
-    }
+    const MAX_MESSAGE_BYTES: usize = 1024 * 1024;
     let sanitizer = match DetectorSanitizer::new() {
         Ok(sanitizer) => sanitizer,
         Err(code) => return code,
     };
-    let transformer = match McpTransformer::new(RejectResolver, sanitizer, 1024 * 1024) {
+    let transformer = match McpTransformer::new(RejectResolver, sanitizer, MAX_MESSAGE_BYTES) {
         Ok(transformer) => transformer,
         Err(error) => return fail(&error.to_string()),
     };
@@ -756,8 +763,18 @@ fn mcp_command(args: &ArgMatches) -> ExitCode {
     let server = args
         .get_one::<String>("server")
         .map_or("preview", String::as_str);
-    for line in input.lines().filter(|line| !line.trim().is_empty()) {
-        match transformer.transform(direction, server, line) {
+    let stdin = io::stdin();
+    let mut reader = stdin.lock();
+    loop {
+        let line = match read_bounded_line(&mut reader, MAX_MESSAGE_BYTES) {
+            Ok(Some(line)) => line,
+            Ok(None) => break,
+            Err(error) => return fail(error),
+        };
+        if line.trim().is_empty() {
+            continue;
+        }
+        match transformer.transform(direction, server, &line) {
             Ok((output, audit)) => {
                 println!("{output}");
                 eprintln!(
@@ -769,6 +786,43 @@ fn mcp_command(args: &ArgMatches) -> ExitCode {
         }
     }
     ExitCode::SUCCESS
+}
+
+fn read_bounded_line<R: BufRead>(
+    reader: &mut R,
+    max_bytes: usize,
+) -> Result<Option<String>, &'static str> {
+    let mut line = Vec::new();
+    loop {
+        let buffer = reader
+            .fill_buf()
+            .map_err(|_| "could not read MCP message")?;
+        if buffer.is_empty() {
+            if line.is_empty() {
+                return Ok(None);
+            }
+            return String::from_utf8(line)
+                .map(Some)
+                .map_err(|_| "invalid MCP JSON-RPC message");
+        }
+        let (consumed, complete) =
+            if let Some(newline) = buffer.iter().position(|byte| *byte == b'\n') {
+                line.extend_from_slice(&buffer[..newline]);
+                (newline + 1, true)
+            } else {
+                line.extend_from_slice(buffer);
+                (buffer.len(), false)
+            };
+        reader.consume(consumed);
+        if line.len() > max_bytes {
+            return Err("MCP message exceeds the configured size limit");
+        }
+        if complete {
+            return String::from_utf8(line)
+                .map(Some)
+                .map_err(|_| "invalid MCP JSON-RPC message");
+        }
+    }
 }
 
 async fn run_agent_command(args: &ArgMatches) -> ExitCode {
@@ -798,7 +852,8 @@ async fn run_agent_command(args: &ArgMatches) -> ExitCode {
     eprintln!("- managed provider request/response proxy: available");
     eprintln!("- interactive terminal output sanitization: unavailable");
     eprintln!("- direct filesystem/network bypass prevention: unavailable");
-    eprintln!("- provider credential isolation from the agent environment: unavailable");
+    eprintln!("- parent secret environment isolation: available");
+    eprintln!("- provider credential broker: unavailable; use the agent credential store");
     eprintln!("- one-run opt-out: --no-proxy or {BYPASS_ENV}=1");
 
     if agent == "codex" && codex_overrides_proxy(&agent_args) {
@@ -841,6 +896,7 @@ async fn run_agent_command(args: &ArgMatches) -> ExitCode {
     let proxy_task = tokio::spawn(bound.serve(proxy_cancellation));
 
     let mut command = tokio::process::Command::new(agent_command);
+    configure_managed_agent_environment(&mut command);
     configure_agent_command(agent, &mut command, &agent_args, &proxy_origin);
     let status = command.status().await;
     cancellation.cancel();
@@ -848,6 +904,30 @@ async fn run_agent_command(args: &ArgMatches) -> ExitCode {
     match status {
         Ok(status) => exit_from_code(status.code()),
         Err(error) => fail(&format!("could not run agent: {}", error.kind())),
+    }
+}
+
+fn configure_managed_agent_environment(command: &mut tokio::process::Command) {
+    command.env_clear();
+    for name in [
+        "PATH",
+        "HOME",
+        "USER",
+        "LOGNAME",
+        "SHELL",
+        "TERM",
+        "TMPDIR",
+        "LANG",
+        "LC_ALL",
+        "XDG_CONFIG_HOME",
+        "XDG_DATA_HOME",
+        "XDG_CACHE_HOME",
+        "NO_COLOR",
+        "COLORTERM",
+    ] {
+        if let Some(value) = env::var_os(name) {
+            command.env(name, value);
+        }
     }
 }
 

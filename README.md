@@ -21,7 +21,7 @@ This repository is pre-release software:
 - **Preview:** Claude, Codex, and OpenCode wrappers; MCP stdio transformer; TypeScript
   SDK.
 - **Not implemented:** OS keychain adapter, transparent network interception, filesystem
-  sandbox, MCP network transports, Windows support.
+  sandbox, automatic PII discovery, MCP network transports, Windows support.
 
 Use fake credentials while evaluating the project.
 
@@ -252,8 +252,11 @@ blindfold run codex -- review
 blindfold run opencode -- run "inspect this project"
 ```
 
-No persistent Claude, Codex, or OpenCode configuration is changed. Existing agent
-authentication continues to work normally.
+No persistent Claude, Codex, or OpenCode configuration is changed. Managed wrappers
+start the agent with an allowlisted environment, so parent API-key variables and
+unrelated secrets are not inherited. Authenticate the agent with its persistent
+credential store or login flow; environment-only provider authentication is not
+available in managed mode.
 
 Keep typing the native command names by activating shell wrappers:
 
@@ -284,6 +287,10 @@ The wrapper prints protected and unavailable controls before launch. It currentl
 sanitizes supported provider traffic, but not interactive terminal output, and it cannot
 prevent direct filesystem or network bypasses. `--strict` refuses to start while those
 controls remain unavailable.
+
+Automatic PII detection is not implemented. The TypeScript SDK restores only PII values
+that the application explicitly supplies to it; this is not repository or traffic PII
+discovery.
 
 See [Coding agent wrappers](docs/coding-agents.md) for custom gateway examples and
 agent-specific routing behavior.

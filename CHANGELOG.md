@@ -34,6 +34,10 @@ project follows Semantic Versioning as described in
 
 ### Fixed
 
+- Managed coding-agent wrappers no longer inherit the parent secret environment.
+- Audit reads reject symlinks, oversized files, malformed records, and free-form fields.
+- MCP stdio reads are bounded per message and plaintext credential-named tool arguments
+  fail closed.
 - Proxy sanitization now covers nested tool payloads and rejects unsupported non-empty
   media types.
 - Diff scanning no longer treats a whole line as safe because it contains a SafeRef or

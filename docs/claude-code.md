@@ -25,15 +25,16 @@ Startup must list each path as protected, degraded, or unprotected.
 The following remain unprotected unless the wrapper can explicitly mediate them:
 
 - direct provider endpoints or credentials configured outside the wrapper;
-- inherited raw secrets in the agent process environment;
 - direct filesystem or network access not covered by a supported hook;
 - commands launched outside `blindfold exec`;
 - unsupported Claude Code versions, hooks, plugins, or transports; and
 - child processes intentionally exfiltrating a value they were approved to receive.
 
-The current preview does not sanitize the interactive terminal stream, install file/tool
-hooks, isolate provider credentials from the agent environment, or prevent direct
-network/filesystem bypasses.
+The managed child uses an environment allowlist and does not inherit parent API-key
+variables or unrelated secrets. The current preview does not sanitize the interactive
+terminal stream, install file/tool hooks, broker provider credentials, or prevent direct
+network/filesystem bypasses. Authenticate through Claude's persistent login or
+credential store; environment-only authentication requires a visible bypass.
 
 `--strict` refuses to start because these controls cannot yet establish the documented
 MVP boundary. It does not create an OS sandbox or network firewall.

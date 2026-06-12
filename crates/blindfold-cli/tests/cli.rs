@@ -73,7 +73,7 @@ fn fake_agent(directory: &Path) -> Result<PathBuf, std::io::Error> {
     let path = directory.join("fake-agent");
     fs::write(
         &path,
-        "#!/bin/sh\nprintf '%s\\n' \"$@\" > agent-args\nprintf '%s' \"${ANTHROPIC_BASE_URL-}\" > anthropic-base\nprintf '%s' \"${OPENCODE_CONFIG_CONTENT-}\" > opencode-config\n",
+        "#!/bin/sh\nprintf '%s\\n' \"$@\" > agent-args\nprintf '%s' \"${ANTHROPIC_BASE_URL-}\" > anthropic-base\nprintf '%s' \"${OPENCODE_CONFIG_CONTENT-}\" > opencode-config\nprintf '%s' \"${BLINDFOLD_MASTER_KEY-}\" > inherited-master-key\nprintf '%s' \"${UNRELATED_PARENT_SECRET-}\" > inherited-parent-secret\n",
     )?;
     let mut permissions = fs::metadata(&path)?.permissions();
     permissions.set_mode(0o700);
@@ -353,6 +353,61 @@ fn policy_diff_and_mcp_commands_are_safe() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
+#[cfg(unix)]
+#[test]
+fn audit_rejects_a_symlink_without_printing_its_target() -> Result<(), Box<dyn Error>> {
+    use std::os::unix::fs::symlink;
+
+    let directory = TestDirectory::new()?;
+    let private = "raw audit target secret";
+    let external = directory.path().join("external.txt");
+    fs::write(&external, private)?;
+    fs::create_dir(directory.path().join(".blindfold"))?;
+    symlink(&external, directory.path().join(".blindfold/audit.jsonl"))?;
+
+    let output = blindfold(directory.path(), &["audit"])?;
+    let combined = format!("{}{}", stdout(&output), stderr(&output));
+    assert!(!output.status.success());
+    assert!(!combined.contains(private));
+    assert_eq!(fs::read_to_string(external)?, private);
+    Ok(())
+}
+
+#[test]
+fn mcp_rejects_plaintext_in_credential_named_arguments() -> Result<(), Box<dyn Error>> {
+    let directory = TestDirectory::new()?;
+    let message = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"demo\",\"arguments\":{\"api_key\":\"AbCdEf0123456789+/xyZQ==\"}}}\n";
+    let output = blindfold_with_input(
+        directory.path(),
+        &["mcp", "--direction", "to-server"],
+        message,
+    )?;
+
+    assert!(!output.status.success());
+    assert!(!stdout(&output).contains("AbCdEf0123456789+/xyZQ=="));
+    assert!(stderr(&output).contains("credential-bearing"));
+    Ok(())
+}
+
+#[test]
+fn mcp_rejects_an_oversized_message_without_buffering_all_stdin() -> Result<(), Box<dyn Error>> {
+    let directory = TestDirectory::new()?;
+    let oversized = format!(
+        "{{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":\"{}\"}}\n",
+        "x".repeat(1024 * 1024)
+    );
+    let output = blindfold_with_input(
+        directory.path(),
+        &["mcp", "--direction", "to-agent"],
+        &oversized,
+    )?;
+
+    assert!(!output.status.success());
+    assert!(stderr(&output).contains("size limit"));
+    assert!(output.stdout.is_empty());
+    Ok(())
+}
+
 #[test]
 fn vault_lists_only_safe_references() -> Result<(), Box<dyn Error>> {
     let directory = TestDirectory::new()?;
@@ -528,6 +583,36 @@ fn wrapper_bypass_does_not_inject_proxy_configuration() -> Result<(), Box<dyn Er
         "--version\n"
     );
     assert!(stderr(&output).contains("bypass requested"));
+    Ok(())
+}
+
+#[test]
+fn managed_wrapper_does_not_inherit_parent_secrets() -> Result<(), Box<dyn Error>> {
+    let directory = TestDirectory::new()?;
+    let agent = fake_agent(directory.path())?;
+    let output = Command::new(env!("CARGO_BIN_EXE_blindfold"))
+        .args([
+            "run",
+            "codex",
+            "--agent-command",
+            agent.to_str().ok_or("non-UTF-8 agent path")?,
+            "--",
+            "--version",
+        ])
+        .env("BLINDFOLD_MASTER_KEY", "11".repeat(32))
+        .env("UNRELATED_PARENT_SECRET", "fake-parent-secret")
+        .current_dir(directory.path())
+        .output()?;
+
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert_eq!(
+        fs::read_to_string(directory.path().join("inherited-master-key"))?,
+        ""
+    );
+    assert_eq!(
+        fs::read_to_string(directory.path().join("inherited-parent-secret"))?,
+        ""
+    );
     Ok(())
 }
 

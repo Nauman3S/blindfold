@@ -20,7 +20,8 @@ containment or perfect secret detection.
 ## Assets
 
 - credentials, tokens, private keys, certificates, and credential-bearing URLs;
-- customer PII encountered in managed traffic;
+- caller-identified PII supplied to the preview SDK; automatic PII discovery is not
+  currently implemented;
 - vault encryption keys and SafeRef mappings;
 - policy configuration and audit integrity;
 - sanitized prompts, responses, and command output; and

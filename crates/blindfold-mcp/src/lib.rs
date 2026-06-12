@@ -54,6 +54,8 @@ pub enum Error {
     InvalidJson,
     /// A `SafeRef` appeared outside an approved field or could not be resolved.
     ReferenceRejected,
+    /// A credential-bearing argument contained plaintext instead of an approved reference.
+    SensitiveValueRejected,
     /// The transformed message exceeded the configured maximum.
     MessageTooLarge,
 }
@@ -63,6 +65,9 @@ impl fmt::Display for Error {
         formatter.write_str(match self {
             Self::InvalidJson => "invalid MCP JSON-RPC message",
             Self::ReferenceRejected => "MCP reference resolution was rejected",
+            Self::SensitiveValueRejected => {
+                "plaintext in a credential-bearing MCP argument was rejected"
+            }
             Self::MessageTooLarge => "MCP message exceeds the configured size limit",
         })
     }
@@ -153,11 +158,11 @@ where
         restore_value(
             &self.resolver,
             &self.sanitizer,
-            server,
-            &tool,
+            (server, &tool),
             "/params/arguments",
             arguments,
             audit,
+            false,
         )
     }
 }
@@ -165,21 +170,25 @@ where
 fn restore_value<R: Resolver, S: Sanitizer>(
     resolver: &R,
     sanitizer: &S,
-    server: &str,
-    tool: &str,
+    target: (&str, &str),
     pointer: &str,
     value: &mut Value,
     audit: &mut Audit,
+    sensitive_field: bool,
 ) -> Result<(), Error> {
     match value {
         Value::String(text) => {
             let Ok(safe_ref) = SafeRef::parse(text) else {
+                if sensitive_field && !text.is_empty() {
+                    audit.rejected += 1;
+                    return Err(Error::SensitiveValueRejected);
+                }
                 let (replacement, count) = sanitizer.sanitize(text);
                 *text = replacement;
                 audit.sanitized += count;
                 return Ok(());
             };
-            if !resolver.allows(server, tool, pointer) {
+            if !resolver.allows(target.0, target.1, pointer) {
                 audit.rejected += 1;
                 return Err(Error::ReferenceRejected);
             }
@@ -195,30 +204,52 @@ fn restore_value<R: Resolver, S: Sanitizer>(
                 restore_value(
                     resolver,
                     sanitizer,
-                    server,
-                    tool,
+                    target,
                     &format!("{pointer}/{index}"),
                     child,
                     audit,
+                    sensitive_field,
                 )?;
             }
         }
         Value::Object(values) => {
             for (key, child) in values {
+                let child_is_sensitive = sensitive_field || is_sensitive_field(key);
                 restore_value(
                     resolver,
                     sanitizer,
-                    server,
-                    tool,
+                    target,
                     &format!("{pointer}/{}", escape_pointer(key)),
                     child,
                     audit,
+                    child_is_sensitive,
                 )?;
             }
         }
         _ => {}
     }
     Ok(())
+}
+
+fn is_sensitive_field(key: &str) -> bool {
+    let normalized = key
+        .chars()
+        .filter(char::is_ascii_alphanumeric)
+        .flat_map(char::to_lowercase)
+        .collect::<String>();
+    matches!(
+        normalized.as_str(),
+        "apikey"
+            | "accesstoken"
+            | "authtoken"
+            | "bearertoken"
+            | "clientsecret"
+            | "password"
+            | "passwd"
+            | "privatekey"
+            | "secret"
+            | "token"
+    )
 }
 
 fn reject_any_reference(value: &Value, audit: &mut Audit) -> Result<(), Error> {
@@ -322,6 +353,25 @@ mod tests {
         assert_eq!(
             transformer().transform(Direction::ToServer, "demo", &input),
             Err(Error::ReferenceRejected)
+        );
+    }
+
+    #[test]
+    fn rejects_plaintext_in_credential_named_field() {
+        let input = r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"customers","arguments":{"api_key":"AbCdEf0123456789+/xyZQ=="}}}"#;
+        assert_eq!(
+            transformer().transform(Direction::ToServer, "demo", input),
+            Err(Error::SensitiveValueRejected)
+        );
+    }
+
+    #[test]
+    fn permits_plaintext_in_non_credential_field() {
+        let input = r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"customers","arguments":{"query":"find active customers"}}}"#;
+        assert!(
+            transformer()
+                .transform(Direction::ToServer, "demo", input)
+                .is_ok()
         );
     }
 

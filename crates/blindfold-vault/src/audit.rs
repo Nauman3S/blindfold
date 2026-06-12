@@ -1,10 +1,10 @@
 use std::fs::{self, OpenOptions};
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use blindfold_core::SafeRef;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::fs::{
     PathState, open_lock, prepare_parent, reject_symlink, restrict_file, set_file_mode,
@@ -12,7 +12,7 @@ use crate::fs::{
 use crate::{VaultError, VaultResult};
 
 /// Closed set of operations that may be recorded in the safe audit log.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum AuditAction {
@@ -29,7 +29,7 @@ pub enum AuditAction {
 }
 
 /// Closed set of safe audit outcomes.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum AuditOutcome {
@@ -209,6 +209,58 @@ impl AuditLog {
             .map_err(|_| VaultError::StorageUnavailable)
     }
 
+    /// Reads and validates the active audit log as canonical JSON lines.
+    ///
+    /// The active file is bounded by the configured rotation size. Every record
+    /// must match the closed audit schema before any content is returned.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for symlinks, oversized or malformed files, unsupported
+    /// record versions, or invalid references.
+    pub fn read_lines(&self) -> VaultResult<Vec<String>> {
+        let _lock = open_lock(&self.lock_path)?;
+        if reject_symlink(&self.path)? == PathState::Missing {
+            return Ok(Vec::new());
+        }
+        let metadata = fs::metadata(&self.path).map_err(|_| VaultError::StorageUnavailable)?;
+        if metadata.len() > self.rotation.max_bytes {
+            return Err(VaultError::StorageUnavailable);
+        }
+
+        let mut options = OpenOptions::new();
+        options.read(true);
+        let file = options
+            .open(&self.path)
+            .map_err(|_| VaultError::StorageUnavailable)?;
+        reject_symlink(&self.path)?;
+        let capacity =
+            usize::try_from(metadata.len()).map_err(|_| VaultError::StorageUnavailable)?;
+        let mut contents = Vec::with_capacity(capacity);
+        file.take(self.rotation.max_bytes.saturating_add(1))
+            .read_to_end(&mut contents)
+            .map_err(|_| VaultError::StorageUnavailable)?;
+        if u64::try_from(contents.len()).map_or(true, |length| length > self.rotation.max_bytes) {
+            return Err(VaultError::StorageUnavailable);
+        }
+
+        contents
+            .split(|byte| *byte == b'\n')
+            .filter(|line| !line.is_empty())
+            .map(|line| {
+                let event: StoredEvent =
+                    serde_json::from_slice(line).map_err(|_| VaultError::StorageUnavailable)?;
+                if event.version != 1 {
+                    return Err(VaultError::StorageUnavailable);
+                }
+                if let Some(reference) = event.safe_ref.as_deref() {
+                    SafeRef::parse(reference).map_err(|_| VaultError::StorageUnavailable)?;
+                }
+                serde_json::to_string(&event).map_err(|_| VaultError::StorageUnavailable)
+            })
+            .collect()
+    }
+
     fn rotate(&self) -> VaultResult<()> {
         let oldest = rotated_path(&self.path, self.rotation.retained_files)?;
         reject_symlink(&oldest)?;
@@ -243,6 +295,17 @@ struct DiskEvent<'a> {
     outcome: AuditOutcome,
     #[serde(skip_serializing_if = "Option::is_none")]
     safe_ref: Option<&'a str>,
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct StoredEvent {
+    version: u8,
+    timestamp: u64,
+    action: AuditAction,
+    outcome: AuditOutcome,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    safe_ref: Option<String>,
 }
 
 fn adjacent_path(path: &Path, suffix: &str) -> VaultResult<PathBuf> {

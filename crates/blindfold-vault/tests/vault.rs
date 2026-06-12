@@ -217,6 +217,51 @@ fn audit_is_safe_append_only_and_rotates() {
     assert!(!text.contains("fake-secret"));
 }
 
+#[test]
+fn audit_read_validates_and_canonicalizes_records() {
+    let directory = tempdir().unwrap_or_else(|error| panic!("tempdir failed: {error}"));
+    let path = directory.path().join("audit.jsonl");
+    let audit = AuditLog::open(
+        &path,
+        RotationPolicy::new(1024, 2)
+            .unwrap_or_else(|error| panic!("rotation policy failed: {error}")),
+    )
+    .unwrap_or_else(|error| panic!("open failed: {error}"));
+    audit
+        .append(&AuditEvent::now(
+            AuditAction::Store,
+            AuditOutcome::Succeeded,
+            None,
+        ))
+        .unwrap_or_else(|error| panic!("append failed: {error}"));
+
+    let lines = audit
+        .read_lines()
+        .unwrap_or_else(|error| panic!("read failed: {error}"));
+    assert_eq!(lines.len(), 1);
+    assert!(lines[0].starts_with("{\"version\":1,\"timestamp\":"));
+    assert!(lines[0].contains("\"action\":\"store\""));
+}
+
+#[test]
+fn audit_read_rejects_modified_free_form_records() {
+    let directory = tempdir().unwrap_or_else(|error| panic!("tempdir failed: {error}"));
+    let path = directory.path().join("audit.jsonl");
+    let audit = AuditLog::open(
+        &path,
+        RotationPolicy::new(1024, 2)
+            .unwrap_or_else(|error| panic!("rotation policy failed: {error}")),
+    )
+    .unwrap_or_else(|error| panic!("open failed: {error}"));
+    fs::write(
+        &path,
+        br#"{"version":1,"timestamp":1,"action":"store","outcome":"succeeded","message":"raw secret"}"#,
+    )
+    .unwrap_or_else(|error| panic!("write failed: {error}"));
+
+    assert_eq!(audit.read_lines(), Err(VaultError::StorageUnavailable));
+}
+
 #[cfg(unix)]
 #[test]
 fn unix_files_and_directory_are_owner_only() {
