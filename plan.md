@@ -1027,6 +1027,10 @@ returns to the agent.
 - [x] `P4-14` Test secrets split across every possible streaming chunk boundary.
 - [x] `P4-15` Document TLS trust assumptions and why Blindfold is an application-level
   proxy rather than a transparent TLS interceptor.
+- [x] `P4-16` Add explicit payload-free request tracing with request IDs, route,
+  coverage, byte counts, detector categories, sanitized structural pointers, outcomes,
+  and closed issue codes. Persist only bounded owner-only metadata; never payloads,
+  headers, query strings, or raw spans.
 
 **Exit criteria:**
 
@@ -1110,6 +1114,8 @@ protection boundary.
   configured provider traffic; full clean-project provider demos remain.
 - [x] Startup output accurately reports the active boundary.
 - [x] Managed agents do not inherit the vault master key or unrelated parent secrets.
+- [x] `run --trace` is explicit per invocation and produces independently clearable,
+  schema-validated metadata through `trace list|show|tail|export|clear`.
 - [ ] The full demo passes without a raw fixture appearing in agent-visible output or
   fake provider requests.
 - [x] Strict mode refuses known unsafe/degraded configurations.
@@ -1406,6 +1412,7 @@ test, report, or artifact path when implementation begins.
 | `V-09` | Structured data | Parse redacted `.env`, JSON, YAML, TOML, and URLs | Output remains valid/useful or is safely blocked | TBD |
 | `V-10` | Vault | Wrong key, corruption, permissions, concurrency, recovery, and audit read validation | Fails closed; no raw output | `cargo test -p blindfold-vault`; symlink and malformed audit tests |
 | `V-11` | Proxy security | Loopback, upstream allowlist, loop prevention, limits, malformed payloads | Unsafe cases rejected safely | TBD |
+| `V-11A` | Trace safety | Explicit enablement, closed schema, no payload/header/query retention, rotation, symlink rejection, clear | Trace JSON contains metadata only and modified records fail closed | `cargo test -p blindfold-trace -p blindfold-proxy -p blindfold-cli` |
 | `V-12` | Exec isolation | Inspect child env and process args | Only approved values present; secret absent from argv | `cargo test -p blindfold-cli managed_wrapper_does_not_inherit_parent_secrets` |
 | `V-13` | Policy | Complete mode/destination/sensitivity matrix | Every case has expected deterministic action | TBD |
 | `V-14` | SafeRef abuse | Forged, malformed, replayed, expired, and cross-project references | No unauthorized restoration | TBD |

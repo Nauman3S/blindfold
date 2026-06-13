@@ -203,6 +203,7 @@ dependencies = [
  "blindfold-mcp",
  "blindfold-policy",
  "blindfold-proxy",
+ "blindfold-trace",
  "blindfold-vault",
  "clap",
  "serde",
@@ -259,11 +260,21 @@ name = "blindfold-proxy"
 version = "0.1.0"
 dependencies = [
  "axum",
+ "blindfold-trace",
  "futures-util",
  "reqwest",
  "serde_json",
  "tokio",
  "tokio-util",
+]
+
+[[package]]
+name = "blindfold-trace"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "tempfile",
 ]
 
 [[package]]

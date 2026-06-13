@@ -10,6 +10,9 @@ project follows Semantic Versioning as described in
 
 ### Added
 
+- Explicit payload-free request tracing with `run --trace`,
+  `trace list|show|tail|export|clear`, and the short `bf` binary alias.
+- Closed, bounded, rotating, schema-validated owner-only trace storage.
 - Cryptographically randomized operation-local Rust surrogates.
 - Complete scan reporting with a distinct incomplete-scan exit code.
 - Atomic redacted file output with overwrite protection.

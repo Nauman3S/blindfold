@@ -94,6 +94,77 @@ fn help_and_version_are_available() -> Result<(), Box<dyn Error>> {
         stdout(&version).trim(),
         format!("blindfold {}", env!("CARGO_PKG_VERSION"))
     );
+    let short = Command::new(env!("CARGO_BIN_EXE_bf"))
+        .arg("--version")
+        .current_dir(directory.path())
+        .output()?;
+    assert!(short.status.success());
+    assert_eq!(
+        stdout(&short).trim(),
+        format!("blindfold {}", env!("CARGO_PKG_VERSION"))
+    );
+    Ok(())
+}
+
+#[test]
+fn trace_commands_render_only_closed_metadata_and_clear_explicitly() -> Result<(), Box<dyn Error>> {
+    let directory = TestDirectory::new()?;
+    let blindfold_directory = directory.path().join(".blindfold");
+    fs::create_dir(&blindfold_directory)?;
+    fs::set_permissions(&blindfold_directory, fs::Permissions::from_mode(0o700))?;
+    let raw = "raw-secret-must-not-appear";
+    fs::write(
+        blindfold_directory.join("trace.jsonl"),
+        "{\"version\":1,\"timestamp\":1,\"request_id\":\"req_abcd_1\",\"route\":\"anthropic\",\"coverage\":\"protected\",\"outcome\":\"succeeded\",\"request_bytes_before\":120,\"request_bytes_after\":90,\"response_bytes_before\":80,\"response_bytes_after\":70,\"replacements\":[{\"id\":\"S1\",\"category\":\"bearer_token\",\"pointer\":\"/messages/0/content\",\"occurrences\":2}]}\n",
+    )?;
+
+    let list = blindfold(directory.path(), &["trace", "list"])?;
+    assert!(list.status.success(), "{}", stderr(&list));
+    assert!(stdout(&list).contains("req_abcd_1"));
+
+    let show = blindfold(directory.path(), &["trace", "show", "req_abcd_1"])?;
+    let show_output = stdout(&show);
+    assert!(show.status.success(), "{}", stderr(&show));
+    assert!(show_output.contains("coverage: protected"));
+    assert!(show_output.contains("S1  bearer_token  /messages/0/content"));
+    assert!(!show_output.contains(raw));
+
+    let export = blindfold(
+        directory.path(),
+        &["trace", "export", "req_abcd_1", "--redacted"],
+    )?;
+    assert!(export.status.success(), "{}", stderr(&export));
+    assert!(stdout(&export).contains("\"version\":1"));
+    assert!(!stdout(&export).contains(raw));
+
+    let unconfirmed = blindfold(directory.path(), &["trace", "clear"])?;
+    assert!(!unconfirmed.status.success());
+    assert!(blindfold_directory.join("trace.jsonl").exists());
+    let cleared = blindfold(directory.path(), &["trace", "clear", "--yes"])?;
+    assert!(cleared.status.success(), "{}", stderr(&cleared));
+    assert!(!blindfold_directory.join("trace.jsonl").exists());
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn trace_rejects_symlinked_storage_without_printing_target() -> Result<(), Box<dyn Error>> {
+    use std::os::unix::fs::symlink;
+
+    let directory = TestDirectory::new()?;
+    let blindfold_directory = directory.path().join(".blindfold");
+    fs::create_dir(&blindfold_directory)?;
+    fs::set_permissions(&blindfold_directory, fs::Permissions::from_mode(0o700))?;
+    let raw = "trace target raw secret";
+    let target = directory.path().join("target");
+    fs::write(&target, raw)?;
+    symlink(&target, blindfold_directory.join("trace.jsonl"))?;
+
+    let output = blindfold(directory.path(), &["trace", "list"])?;
+    let combined = format!("{}{}", stdout(&output), stderr(&output));
+    assert!(!output.status.success());
+    assert!(!combined.contains(raw));
+    assert_eq!(fs::read_to_string(target)?, raw);
     Ok(())
 }
 

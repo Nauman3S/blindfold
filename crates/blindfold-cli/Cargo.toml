@@ -11,6 +11,10 @@ repository.workspace = true
 name = "blindfold"
 path = "src/main.rs"
 
+[[bin]]
+name = "bf"
+path = "src/bf.rs"
+
 [dependencies]
 atomic-write-file = "0.3.0"
 blindfold-core = { path = "../blindfold-core" }
@@ -20,6 +24,7 @@ blindfold-exec = { path = "../blindfold-exec" }
 blindfold-mcp = { path = "../blindfold-mcp" }
 blindfold-policy = { path = "../blindfold-policy" }
 blindfold-proxy = { path = "../blindfold-proxy" }
+blindfold-trace = { path = "../blindfold-trace" }
 blindfold-vault = { path = "../blindfold-vault" }
 clap = { version = "4.6.1", default-features = false, features = [
     "error-context",

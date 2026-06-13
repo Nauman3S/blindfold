@@ -12,5 +12,5 @@ mod sanitize;
 
 pub use config::{Config, ConfigError, Provider, Upstream};
 pub use error::{ErrorCode, ProxyError};
-pub use proxy::{BoundProxy, Proxy};
-pub use sanitize::{ExactValueSanitizer, Sanitizer};
+pub use proxy::{BoundProxy, Proxy, TraceSink};
+pub use sanitize::{ExactValueSanitizer, SanitizedText, Sanitizer};

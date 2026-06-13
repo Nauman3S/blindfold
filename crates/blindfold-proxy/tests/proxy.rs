@@ -14,7 +14,8 @@ use axum::{
     response::IntoResponse,
     routing::post,
 };
-use blindfold_proxy::{Config, ExactValueSanitizer, Provider, Proxy, Upstream};
+use blindfold_proxy::{Config, ExactValueSanitizer, Provider, Proxy, TraceSink, Upstream};
+use blindfold_trace::Record;
 use tokio::{net::TcpListener, sync::oneshot};
 use tokio_util::sync::CancellationToken;
 
@@ -29,6 +30,19 @@ struct Capture {
 struct UpstreamState {
     capture: Capture,
     response: Arc<Mutex<Option<Response<Body>>>>,
+}
+
+#[derive(Clone, Default)]
+struct TraceCapture {
+    records: Arc<Mutex<Vec<Record>>>,
+}
+
+impl TraceSink for TraceCapture {
+    fn record(&self, record: Record) {
+        if let Ok(mut records) = self.records.lock() {
+            records.push(record);
+        }
+    }
 }
 
 #[tokio::test]
@@ -56,6 +70,51 @@ async fn fake_upstream_never_receives_raw_openai_value() -> Result<(), Box<dyn s
     assert!(upstream_body.contains("[REDACTED]"));
     assert!(!response_text.contains(SECRET));
     assert!(response_text.contains("[REDACTED]"));
+
+    proxy_stop.cancel();
+    let _ = upstream_stop.send(());
+    Ok(())
+}
+
+#[tokio::test]
+async fn explicit_trace_sink_receives_payload_free_metadata()
+-> Result<(), Box<dyn std::error::Error>> {
+    let capture = Capture::default();
+    let traces = TraceCapture::default();
+    let (upstream, upstream_stop) = spawn_upstream(capture, openai_response()).await?;
+    let config = proxy_config(upstream, Provider::OpenAi)?;
+    let sanitizer = Arc::new(ExactValueSanitizer::new(SECRET, "[REDACTED]")?);
+    let bound = Proxy::new(config, sanitizer)?
+        .with_trace_sink(Arc::new(traces.clone()))
+        .bind()
+        .await?;
+    let address = bound.local_addr();
+    let proxy_stop = CancellationToken::new();
+    let serving_token = proxy_stop.clone();
+    tokio::spawn(async move {
+        let _ = bound.serve(serving_token).await;
+    });
+
+    reqwest::Client::new()
+        .post(format!("http://{address}/openai/v1/chat/completions"))
+        .header(CONTENT_TYPE, "application/json")
+        .body(format!(
+            r#"{{"messages":[{{"role":"user","content":"send {SECRET}"}}]}}"#
+        ))
+        .send()
+        .await?
+        .error_for_status()?;
+
+    let records = traces
+        .records
+        .lock()
+        .map_err(|_| "trace capture poisoned")?;
+    assert_eq!(records.len(), 1);
+    let json = records[0].to_json()?;
+    assert!(!json.contains(SECRET));
+    assert!(!json.contains("[REDACTED]"));
+    assert!(json.contains("\"coverage\":\"protected\""));
+    assert!(json.contains("\"pointer\":\"/messages/0/content\""));
 
     proxy_stop.cancel();
     let _ = upstream_stop.send(());

@@ -4,7 +4,7 @@ use std::io::{self, BufRead, Read, Write};
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use atomic_write_file::AtomicWriteFile;
@@ -25,6 +25,11 @@ use blindfold_mcp::{
 use blindfold_policy::{Operation, Policy, Preset, Request, SourceContext};
 use blindfold_proxy::{
     Config as ProxyConfig, Provider, Proxy, Sanitizer as ProxySanitizer, Upstream,
+};
+use blindfold_proxy::{SanitizedText as ProxySanitizedText, TraceSink as ProxyTraceSink};
+use blindfold_trace::{
+    Category as TraceCategory, Coverage as TraceCoverage, Issue as TraceIssue,
+    Outcome as TraceOutcome, Record as TraceRecord, Route as TraceRoute, Store as TraceStore,
 };
 use blindfold_vault::{
     AuditAction, AuditEvent, AuditLog, AuditOutcome, MasterKey, RotationPolicy, Scope, Vault,
@@ -59,9 +64,10 @@ pub(crate) async fn run() -> ExitCode {
         Some(("diff-check", args)) => diff_command(&root, args),
         Some(("vault", args)) => vault_command(&root, args),
         Some(("audit", _)) => audit_command(&root),
+        Some(("trace", args)) => trace_command(&root, args),
         Some(("proxy", args)) => proxy_command(args).await,
         Some(("mcp", args)) => mcp_command(args),
-        Some(("run", args)) => run_agent_command(args).await,
+        Some(("run", args)) => run_agent_command(&root, args).await,
         Some(("shell-init", args)) => shell_init_command(args),
         _ => ExitCode::FAILURE,
     }
@@ -213,6 +219,46 @@ fn cli() -> Command {
         )
         .subcommand(Command::new("audit").about("Print safe local audit JSON lines"))
         .subcommand(
+            Command::new("trace")
+                .about("Inspect explicitly enabled payload-free request traces")
+                .subcommand(
+                    Command::new("list")
+                        .about("List retained request traces")
+                        .arg(Arg::new("json").long("json").action(ArgAction::SetTrue)),
+                )
+                .subcommand(
+                    Command::new("show")
+                        .about("Show one request trace")
+                        .arg(Arg::new("request_id").required(true))
+                        .arg(Arg::new("json").long("json").action(ArgAction::SetTrue)),
+                )
+                .subcommand(
+                    Command::new("tail")
+                        .about("Show the most recent request trace")
+                        .arg(Arg::new("json").long("json").action(ArgAction::SetTrue)),
+                )
+                .subcommand(
+                    Command::new("export")
+                        .about("Export one trace using the closed redacted JSON schema")
+                        .arg(Arg::new("request_id").required(true))
+                        .arg(
+                            Arg::new("redacted")
+                                .long("redacted")
+                                .required(true)
+                                .action(ArgAction::SetTrue),
+                        ),
+                )
+                .subcommand(
+                    Command::new("clear").about("Delete retained traces").arg(
+                        Arg::new("yes")
+                            .long("yes")
+                            .help("Confirm deletion of all retained traces")
+                            .action(ArgAction::SetTrue),
+                    ),
+                )
+                .subcommand_required(true),
+        )
+        .subcommand(
             Command::new("proxy")
                 .about("Run the loopback LLM proxy")
                 .arg(
@@ -243,6 +289,12 @@ fn cli() -> Command {
                         .value_parser(["claude", "codex", "opencode"]),
                 )
                 .arg(Arg::new("strict").long("strict").action(ArgAction::SetTrue))
+                .arg(
+                    Arg::new("trace")
+                        .long("trace")
+                        .help("Persist bounded payload-free request trace metadata")
+                        .action(ArgAction::SetTrue),
+                )
                 .arg(
                     Arg::new("anthropic")
                         .long("anthropic-upstream")
@@ -687,6 +739,176 @@ fn audit_command(root: &Path) -> ExitCode {
     }
 }
 
+fn trace_command(root: &Path, args: &ArgMatches) -> ExitCode {
+    let store = match open_trace_store(root) {
+        Ok(store) => store,
+        Err(error) => return fail(&error.to_string()),
+    };
+    match args.subcommand() {
+        Some(("clear", clear)) if !clear.get_flag("yes") => {
+            fail("trace clear is destructive; pass --yes to confirm")
+        }
+        Some(("clear", _)) => match store.clear() {
+            Ok(count) => {
+                println!("Removed {count} trace files.");
+                ExitCode::SUCCESS
+            }
+            Err(error) => fail(&error.to_string()),
+        },
+        Some((command @ ("list" | "show" | "tail" | "export"), values)) => {
+            let records = match store.read_all() {
+                Ok(records) => records,
+                Err(error) => return fail(&error.to_string()),
+            };
+            match command {
+                "list" => {
+                    if values.get_flag("json") {
+                        print_trace_json_array(&records)
+                    } else {
+                        for record in &records {
+                            print_trace_summary(record);
+                        }
+                        if records.is_empty() {
+                            println!("No request traces recorded.");
+                        }
+                        ExitCode::SUCCESS
+                    }
+                }
+                "tail" => match records.last() {
+                    Some(record) => print_trace_record(record, values.get_flag("json")),
+                    None => fail("no request traces recorded"),
+                },
+                "show" | "export" => {
+                    let Some(request_id) = values.get_one::<String>("request_id") else {
+                        return fail("request ID is required");
+                    };
+                    let Some(record) = records
+                        .iter()
+                        .find(|record| record.request_id() == request_id)
+                    else {
+                        return fail("request trace was not found");
+                    };
+                    print_trace_record(record, command == "export" || values.get_flag("json"))
+                }
+                _ => fail("trace subcommand is required"),
+            }
+        }
+        _ => fail("trace subcommand is required"),
+    }
+}
+
+fn open_trace_store(root: &Path) -> blindfold_trace::Result<TraceStore> {
+    TraceStore::open(root.join(".blindfold/trace.jsonl"), 1024 * 1024, 3)
+}
+
+fn print_trace_json_array(records: &[TraceRecord]) -> ExitCode {
+    let mut output = String::from("[");
+    for (index, record) in records.iter().enumerate() {
+        if index != 0 {
+            output.push(',');
+        }
+        let Ok(json) = record.to_json() else {
+            return fail("trace serialization failed");
+        };
+        output.push_str(&json);
+    }
+    output.push(']');
+    println!("{output}");
+    ExitCode::SUCCESS
+}
+
+fn print_trace_record(record: &TraceRecord, json: bool) -> ExitCode {
+    if json {
+        return match record.to_json() {
+            Ok(output) => {
+                println!("{output}");
+                ExitCode::SUCCESS
+            }
+            Err(error) => fail(&error.to_string()),
+        };
+    }
+    println!("request: {}", record.request_id());
+    println!(
+        "route: agent -> blindfold -> {}",
+        trace_route_label(record.route())
+    );
+    println!("coverage: {}", trace_coverage_label(record.coverage()));
+    let request = record.request_bytes();
+    let response = record.response_bytes();
+    println!("request: {} bytes -> {} bytes", request.0, request.1);
+    println!("response: {} bytes -> {} bytes", response.0, response.1);
+    println!("outcome: {}", trace_outcome_label(record.outcome()));
+    if let Some(issue) = record.issue() {
+        println!("issue: {}", trace_issue_label(issue));
+    }
+    println!("replacements:");
+    if record.replacements().is_empty() {
+        println!("  none");
+    } else {
+        for replacement in record.replacements() {
+            println!(
+                "  {}  {}  {}  occurrences={}",
+                replacement.id(),
+                replacement.category().label(),
+                replacement.pointer(),
+                replacement.occurrences()
+            );
+        }
+    }
+    println!("retention: metadata only; original and sanitized payloads not retained");
+    ExitCode::SUCCESS
+}
+
+fn print_trace_summary(record: &TraceRecord) {
+    println!(
+        "{}  route={} coverage={} outcome={} replacements={}",
+        record.request_id(),
+        trace_route_label(record.route()),
+        trace_coverage_label(record.coverage()),
+        trace_outcome_label(record.outcome()),
+        record.replacements().len()
+    );
+}
+
+const fn trace_route_label(route: TraceRoute) -> &'static str {
+    match route {
+        TraceRoute::OpenAi => "openai",
+        TraceRoute::Anthropic => "anthropic",
+        TraceRoute::Unknown => "unknown",
+    }
+}
+
+const fn trace_coverage_label(coverage: TraceCoverage) -> &'static str {
+    match coverage {
+        TraceCoverage::Protected => "protected",
+        TraceCoverage::Degraded => "degraded",
+        TraceCoverage::Unprotected => "unprotected",
+    }
+}
+
+const fn trace_outcome_label(outcome: TraceOutcome) -> &'static str {
+    match outcome {
+        TraceOutcome::Succeeded => "succeeded",
+        TraceOutcome::Rejected => "rejected",
+        TraceOutcome::Failed => "failed",
+        TraceOutcome::TimedOut => "timed_out",
+    }
+}
+
+const fn trace_issue_label(issue: TraceIssue) -> &'static str {
+    match issue {
+        TraceIssue::UnsupportedRequest => "unsupported_request",
+        TraceIssue::UnsupportedResponse => "unsupported_response",
+        TraceIssue::RequestTooLarge => "request_too_large",
+        TraceIssue::ResponseTooLarge => "response_too_large",
+        TraceIssue::InvalidPayload => "invalid_payload",
+        TraceIssue::ProxyLoop => "proxy_loop",
+        TraceIssue::RouteNotAllowed => "route_not_allowed",
+        TraceIssue::UpstreamFailure => "upstream_failure",
+        TraceIssue::Timeout => "timeout",
+    }
+}
+
 async fn proxy_command(args: &ArgMatches) -> ExitCode {
     let Some(listen) = args
         .get_one::<String>("listen")
@@ -825,7 +1047,7 @@ fn read_bounded_line<R: BufRead>(
     }
 }
 
-async fn run_agent_command(args: &ArgMatches) -> ExitCode {
+async fn run_agent_command(root: &Path, args: &ArgMatches) -> ExitCode {
     let agent = args
         .get_one::<String>("agent")
         .map_or("claude", String::as_str);
@@ -854,6 +1076,14 @@ async fn run_agent_command(args: &ArgMatches) -> ExitCode {
     eprintln!("- direct filesystem/network bypass prevention: unavailable");
     eprintln!("- parent secret environment isolation: available");
     eprintln!("- provider credential broker: unavailable; use the agent credential store");
+    eprintln!(
+        "- payload-free request tracing: {}",
+        if args.get_flag("trace") {
+            "enabled"
+        } else {
+            "disabled"
+        }
+    );
     eprintln!("- one-run opt-out: --no-proxy or {BYPASS_ENV}=1");
 
     if agent == "codex" && codex_overrides_proxy(&agent_args) {
@@ -886,6 +1116,19 @@ async fn run_agent_command(args: &ArgMatches) -> ExitCode {
         Ok(proxy) => proxy,
         Err(error) => return fail(&error.to_string()),
     };
+    let trace_sink = if args.get_flag("trace") {
+        let store = match open_trace_store(root) {
+            Ok(store) => store,
+            Err(error) => return fail(&error.to_string()),
+        };
+        Some(Arc::new(CliTraceSink::new(store)))
+    } else {
+        None
+    };
+    let proxy = match &trace_sink {
+        Some(sink) => proxy.with_trace_sink(Arc::clone(sink) as Arc<dyn ProxyTraceSink>),
+        None => proxy,
+    };
     let bound = match proxy.bind().await {
         Ok(bound) => bound,
         Err(error) => return fail(&error.to_string()),
@@ -901,6 +1144,9 @@ async fn run_agent_command(args: &ArgMatches) -> ExitCode {
     let status = command.status().await;
     cancellation.cancel();
     let _ = proxy_task.await;
+    if trace_sink.is_some_and(|sink| sink.failed()) {
+        return fail("one or more request traces could not be persisted safely");
+    }
     match status {
         Ok(status) => exit_from_code(status.code()),
         Err(error) => fail(&format!("could not run agent: {}", error.kind())),
@@ -1098,6 +1344,74 @@ impl ProxySanitizer for DetectorSanitizer {
 
     fn required_overlap(&self) -> usize {
         512
+    }
+
+    fn sanitize_traced(&self, text: &str) -> ProxySanitizedText {
+        let output = self
+            .redactor
+            .redact(text, RedactionOptions::new(RedactionMode::Placeholder));
+        match output {
+            Ok(output) => {
+                let categories = output
+                    .findings()
+                    .iter()
+                    .map(|finding| trace_category(finding.kind()))
+                    .collect();
+                ProxySanitizedText::new(output.into_text(), categories)
+            }
+            Err(_) => {
+                ProxySanitizedText::new("[BLOCKED]".to_owned(), vec![TraceCategory::Sensitive])
+            }
+        }
+    }
+}
+
+struct CliTraceSink {
+    store: TraceStore,
+    failed: Mutex<bool>,
+}
+
+impl CliTraceSink {
+    const fn new(store: TraceStore) -> Self {
+        Self {
+            store,
+            failed: Mutex::new(false),
+        }
+    }
+
+    fn failed(&self) -> bool {
+        self.failed.lock().map_or(true, |failed| *failed)
+    }
+}
+
+impl ProxyTraceSink for CliTraceSink {
+    fn record(&self, record: TraceRecord) {
+        if self.store.append(&record).is_err()
+            && let Ok(mut failed) = self.failed.lock()
+        {
+            *failed = true;
+        }
+    }
+}
+
+const fn trace_category(kind: blindfold_detectors::SecretKind) -> TraceCategory {
+    match kind {
+        blindfold_detectors::SecretKind::OpenAiApiKey => TraceCategory::OpenAiApiKey,
+        blindfold_detectors::SecretKind::AnthropicApiKey => TraceCategory::AnthropicApiKey,
+        blindfold_detectors::SecretKind::GitHubToken => TraceCategory::GitHubToken,
+        blindfold_detectors::SecretKind::StripeKey => TraceCategory::StripeKey,
+        blindfold_detectors::SecretKind::SlackToken => TraceCategory::SlackToken,
+        blindfold_detectors::SecretKind::AwsAccessKeyId => TraceCategory::AwsAccessKeyId,
+        blindfold_detectors::SecretKind::AwsSecretAccessKey => TraceCategory::AwsSecretAccessKey,
+        blindfold_detectors::SecretKind::BearerToken => TraceCategory::BearerToken,
+        blindfold_detectors::SecretKind::JsonWebToken => TraceCategory::Jwt,
+        blindfold_detectors::SecretKind::OAuthToken => TraceCategory::OAuthToken,
+        blindfold_detectors::SecretKind::PemPrivateKey => TraceCategory::PemPrivateKey,
+        blindfold_detectors::SecretKind::CredentialUrl => TraceCategory::CredentialUrl,
+        blindfold_detectors::SecretKind::Password => TraceCategory::Password,
+        blindfold_detectors::SecretKind::ApiKey => TraceCategory::ApiKey,
+        blindfold_detectors::SecretKind::Token => TraceCategory::Token,
+        _ => TraceCategory::Sensitive,
     }
 }
 

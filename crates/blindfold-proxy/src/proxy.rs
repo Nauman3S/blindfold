@@ -1,9 +1,13 @@
 //! Listener lifecycle and forwarding implementation.
 
 use std::{
-    collections::HashMap,
+    collections::{BTreeMap, HashMap},
     net::{IpAddr, SocketAddr},
-    sync::Arc,
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
+    time::{SystemTime, UNIX_EPOCH},
 };
 
 use axum::{
@@ -23,13 +27,16 @@ use serde_json::Value;
 use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
 
+use blindfold_trace::{Category, Coverage, Issue, Outcome, Record, Replacement, Route};
+
 use crate::{
     Config, ConfigError, ErrorCode, Provider, ProxyError, Sanitizer, Upstream,
-    sanitize::{sanitize_json, sanitize_sse},
+    sanitize::{Observation, sanitize_json, sanitize_sse},
 };
 
 const LOOP_HEADER: HeaderName = HeaderName::from_static("x-blindfold-proxy-hop");
 const LOOP_VALUE: HeaderValue = HeaderValue::from_static("1");
+static NEXT_REQUEST_ID: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Clone, Copy)]
 enum BodySource {
@@ -42,6 +49,13 @@ pub struct Proxy {
     config: Config,
     client: reqwest::Client,
     sanitizer: Arc<dyn Sanitizer>,
+    trace_sink: Option<Arc<dyn TraceSink>>,
+}
+
+/// Receives payload-free trace records when tracing is explicitly enabled.
+pub trait TraceSink: Send + Sync + 'static {
+    /// Records one completed or rejected managed exchange.
+    fn record(&self, record: Record);
 }
 
 /// A bound listener ready to serve until cancelled.
@@ -59,6 +73,7 @@ struct AppState {
     max_request_body: usize,
     max_response_body: usize,
     request_timeout: std::time::Duration,
+    trace_sink: Option<Arc<dyn TraceSink>>,
 }
 
 impl Proxy {
@@ -79,7 +94,15 @@ impl Proxy {
             config,
             client,
             sanitizer,
+            trace_sink: None,
         })
+    }
+
+    /// Attaches an explicit payload-free trace sink.
+    #[must_use]
+    pub fn with_trace_sink(mut self, trace_sink: Arc<dyn TraceSink>) -> Self {
+        self.trace_sink = Some(trace_sink);
+        self
     }
 
     /// Binds the configured address and performs final loop checks.
@@ -108,6 +131,7 @@ impl Proxy {
             max_request_body: self.config.max_request_body,
             max_response_body: self.config.max_response_body,
             request_timeout: self.config.request_timeout,
+            trace_sink: self.trace_sink,
         };
         let router = Router::new()
             .route("/{upstream}", any(forward_root))
@@ -162,15 +186,33 @@ async fn forward(
     path: String,
     request: Request<Body>,
 ) -> Response<Body> {
+    let Some(upstream) = state.upstreams.get(&upstream_name) else {
+        RequestTrace::unknown().emit(
+            state.trace_sink.as_deref(),
+            Some(ErrorCode::UpstreamNotAllowed),
+        );
+        return ProxyError::new(ErrorCode::UpstreamNotAllowed).into_response();
+    };
+    let mut trace = RequestTrace::new(upstream.provider);
     match tokio::time::timeout(
         state.request_timeout,
-        forward_inner(&state, &upstream_name, &path, request),
+        forward_inner(&state, &upstream_name, &path, request, &mut trace),
     )
     .await
     {
-        Ok(Ok(response)) => response,
-        Ok(Err(error)) => error.into_response(),
-        Err(_) => ProxyError::new(ErrorCode::Timeout).into_response(),
+        Ok(Ok(response)) => {
+            trace.emit(state.trace_sink.as_deref(), None);
+            response
+        }
+        Ok(Err(error)) => {
+            trace.emit(state.trace_sink.as_deref(), Some(error.code()));
+            error.into_response()
+        }
+        Err(_) => {
+            trace.issue = Some(Issue::Timeout);
+            trace.emit(state.trace_sink.as_deref(), Some(ErrorCode::Timeout));
+            ProxyError::new(ErrorCode::Timeout).into_response()
+        }
     }
 }
 
@@ -179,6 +221,7 @@ async fn forward_inner(
     upstream_name: &str,
     path: &str,
     request: Request<Body>,
+    trace: &mut RequestTrace,
 ) -> Result<Response<Body>, ProxyError> {
     let upstream = state
         .upstreams
@@ -194,14 +237,20 @@ async fn forward_inner(
     let body = to_bytes(body, state.max_request_body)
         .await
         .map_err(|_| ProxyError::new(ErrorCode::RequestTooLarge))?;
+    trace.request_before = body.len();
     let request_type = content_type(&parts.headers);
-    let body = sanitize_body(
+    let (body, observations) = sanitize_body(
         upstream.provider,
         BodySource::Request,
         request_type,
         &body,
         state.sanitizer.as_ref(),
-    )?;
+    )
+    .inspect_err(|error| {
+        trace.issue = Some(issue_for(error.code(), BodySource::Request));
+    })?;
+    trace.request_after = body.len();
+    trace.observe(observations);
     let url = destination_url(&upstream.base_url, path, &parts.uri);
 
     let mut outbound = state.client.request(parts.method, url).body(body);
@@ -222,13 +271,19 @@ async fn forward_inner(
     let headers = upstream_response.headers().clone();
     let response_type = content_type(&headers);
     let body = collect_response(upstream_response, state.max_response_body).await?;
-    let body = sanitize_body(
+    trace.response_before = body.len();
+    let (body, observations) = sanitize_body(
         upstream.provider,
         BodySource::Response,
         response_type,
         &body,
         state.sanitizer.as_ref(),
-    )?;
+    )
+    .inspect_err(|error| {
+        trace.issue = Some(issue_for(error.code(), BodySource::Response));
+    })?;
+    trace.response_after = body.len();
+    trace.observe(observations);
 
     let mut response = Response::builder().status(status);
     for (name, value) in &headers {
@@ -300,9 +355,9 @@ fn sanitize_body(
     content_type: Option<&str>,
     body: &[u8],
     sanitizer: &dyn Sanitizer,
-) -> Result<Vec<u8>, ProxyError> {
+) -> Result<(Vec<u8>, Vec<Observation>), ProxyError> {
     if body.is_empty() {
-        return Ok(Vec::new());
+        return Ok((Vec::new(), Vec::new()));
     }
     if content_type.is_some_and(is_sse) {
         return sanitize_sse(provider, body, sanitizer)
@@ -311,13 +366,130 @@ fn sanitize_body(
     if content_type.is_some_and(is_json) {
         let mut value: Value =
             serde_json::from_slice(body).map_err(|_| ProxyError::new(ErrorCode::InvalidJson))?;
-        sanitize_json(provider, &mut value, sanitizer);
-        return serde_json::to_vec(&value).map_err(|_| ProxyError::new(ErrorCode::InvalidJson));
+        let observations = sanitize_json(provider, &mut value, sanitizer);
+        let output =
+            serde_json::to_vec(&value).map_err(|_| ProxyError::new(ErrorCode::InvalidJson))?;
+        return Ok((output, observations));
     }
     Err(ProxyError::new(match source {
         BodySource::Request => ErrorCode::InvalidRequest,
         BodySource::Response => ErrorCode::UpstreamFailure,
     }))
+}
+
+struct RequestTrace {
+    request_id: String,
+    route: Route,
+    request_before: usize,
+    request_after: usize,
+    response_before: usize,
+    response_after: usize,
+    observations: BTreeMap<(Category, String), u32>,
+    issue: Option<Issue>,
+}
+
+impl RequestTrace {
+    fn unknown() -> Self {
+        Self::with_route(Route::Unknown)
+    }
+
+    fn new(provider: Provider) -> Self {
+        Self::with_route(match provider {
+            Provider::OpenAi => Route::OpenAi,
+            Provider::Anthropic => Route::Anthropic,
+        })
+    }
+
+    fn with_route(route: Route) -> Self {
+        let timestamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_or(0, |duration| duration.as_nanos());
+        let sequence = NEXT_REQUEST_ID.fetch_add(1, Ordering::Relaxed);
+        Self {
+            request_id: format!("req_{timestamp:x}_{sequence:x}"),
+            route,
+            request_before: 0,
+            request_after: 0,
+            response_before: 0,
+            response_after: 0,
+            observations: BTreeMap::new(),
+            issue: None,
+        }
+    }
+
+    fn observe(&mut self, observations: Vec<Observation>) {
+        for observation in observations {
+            *self
+                .observations
+                .entry((observation.category, observation.pointer))
+                .or_default() += 1;
+        }
+    }
+
+    fn emit(&self, sink: Option<&dyn TraceSink>, error: Option<ErrorCode>) {
+        let Some(sink) = sink else {
+            return;
+        };
+        let issue = self
+            .issue
+            .or_else(|| error.map(|code| issue_for(code, BodySource::Request)));
+        let coverage = if issue.is_none() {
+            Coverage::Protected
+        } else if self.request_after > 0 || self.response_after > 0 {
+            Coverage::Degraded
+        } else {
+            Coverage::Unprotected
+        };
+        let outcome = match error {
+            None => Outcome::Succeeded,
+            Some(ErrorCode::Timeout) => Outcome::TimedOut,
+            Some(ErrorCode::UpstreamFailure | ErrorCode::Cancelled) => Outcome::Failed,
+            Some(_) => Outcome::Rejected,
+        };
+        let replacements = self
+            .observations
+            .iter()
+            .enumerate()
+            .filter_map(|(index, ((category, pointer), occurrences))| {
+                Replacement::new(format!("S{}", index + 1), *category, pointer, *occurrences).ok()
+            })
+            .collect();
+        let Ok(record) = Record::now(
+            &self.request_id,
+            self.route,
+            coverage,
+            outcome,
+            (
+                u64::try_from(self.request_before).unwrap_or(u64::MAX),
+                u64::try_from(self.request_after).unwrap_or(u64::MAX),
+            ),
+            (
+                u64::try_from(self.response_before).unwrap_or(u64::MAX),
+                u64::try_from(self.response_after).unwrap_or(u64::MAX),
+            ),
+            replacements,
+            issue,
+        ) else {
+            return;
+        };
+        sink.record(record);
+    }
+}
+
+const fn issue_for(code: ErrorCode, source: BodySource) -> Issue {
+    match code {
+        ErrorCode::UpstreamNotAllowed => Issue::RouteNotAllowed,
+        ErrorCode::ProxyLoop => Issue::ProxyLoop,
+        ErrorCode::RequestTooLarge => Issue::RequestTooLarge,
+        ErrorCode::ResponseTooLarge => Issue::ResponseTooLarge,
+        ErrorCode::InvalidJson => Issue::InvalidPayload,
+        ErrorCode::InvalidRequest => Issue::UnsupportedRequest,
+        ErrorCode::Timeout | ErrorCode::Cancelled => Issue::Timeout,
+        ErrorCode::UpstreamFailure => match source {
+            BodySource::Request => Issue::UpstreamFailure,
+            BodySource::Response => Issue::UnsupportedResponse,
+        },
+    }
 }
 
 fn content_type(headers: &HeaderMap) -> Option<&str> {

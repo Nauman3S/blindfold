@@ -9,6 +9,8 @@ This is the short guide. You do not need to learn every Blindfold command.
 | Start Codex with Blindfold | `blindfold run codex` |
 | Start Claude with Blindfold | `blindfold run claude` |
 | Start OpenCode with Blindfold | `blindfold run opencode` |
+| Trace a managed agent request | `bf run codex --trace` |
+| Inspect the latest trace | `bf trace tail` |
 | Temporarily run an agent without Blindfold | `blindfold run codex --no-proxy` |
 | Check a project for secrets | `blindfold scan .` |
 | Print a file with secrets hidden | `blindfold redact .env` |
@@ -74,7 +76,36 @@ blindfold run claude -- --model sonnet
 blindfold run opencode -- run "find the failing test"
 ```
 
-## Use Case 3: Keep Using the Normal Agent Names
+## Use Case 3: Trace What Blindfold Protected
+
+Tracing is off unless you request it:
+
+```sh
+bf run codex --trace
+```
+
+After the agent makes provider requests:
+
+```sh
+bf trace list
+bf trace tail
+bf trace show req_...
+```
+
+Export one versioned metadata record for a bug report:
+
+```sh
+bf trace export req_... --redacted
+```
+
+The export contains no payload preview, headers, query string, or raw detected value.
+Delete trace metadata independently:
+
+```sh
+bf trace clear --yes
+```
+
+## Use Case 4: Keep Using the Normal Agent Names
 
 Instead of typing `blindfold run` every time, activate shell wrappers:
 
@@ -105,7 +136,7 @@ printf '%s\n' 'eval "$(blindfold shell-init zsh)"' >> ~/.zshrc
 
 Open a new terminal or run `source ~/.zshrc`.
 
-## Use Case 4: Temporarily Opt Out
+## Use Case 5: Temporarily Opt Out
 
 If you activated the shell wrappers, bypass Blindfold for one command:
 
@@ -136,7 +167,7 @@ unset BLINDFOLD_BYPASS
 
 Blindfold prints a bypass notice when it launches an agent without the proxy.
 
-## Use Case 5: Check a Project Before Sharing It
+## Use Case 6: Check a Project Before Sharing It
 
 Scan the current working directory:
 
@@ -161,7 +192,7 @@ scan found sensitive content. Exit code `3` means the scan was incomplete becaus
 I/O error, oversized file, or traversal budget. Policy skips such as ignored or binary
 files are reported but do not by themselves make a scan incomplete.
 
-## Use Case 6: Hide Secrets in a File
+## Use Case 7: Hide Secrets in a File
 
 Print a redacted version of `.env`:
 
@@ -199,7 +230,7 @@ Redact piped text:
 some-command | blindfold redact
 ```
 
-## Use Case 7: Give a Secret to One Command
+## Use Case 8: Give a Secret to One Command
 
 Suppose a command needs `DEMO_API_KEY`:
 
@@ -236,7 +267,7 @@ your-command --token "$DEMO_API_KEY"
 
 Pass secrets through environment variables. Managed child stdin is currently disabled.
 
-## Use Case 8: Check Changes Before Committing
+## Use Case 9: Check Changes Before Committing
 
 Check current tracked changes:
 
@@ -253,7 +284,7 @@ blindfold diff-check --staged
 Use this before `git commit` or in CI. Exit code `2` means a possible secret was found
 in an added line.
 
-## Use Case 9: Store a Temporary Secret Reference
+## Use Case 10: Store a Temporary Secret Reference
 
 The vault is an advanced preview. For local evaluation:
 
