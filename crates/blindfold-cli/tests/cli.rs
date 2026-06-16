@@ -146,6 +146,52 @@ fn trace_commands_render_only_closed_metadata_and_clear_explicitly() -> Result<(
     Ok(())
 }
 
+#[test]
+fn redact_trace_populates_trace_list_and_tail() -> Result<(), Box<dyn Error>> {
+    let directory = TestDirectory::new()?;
+    let raw = "sk-proj-abcdefghijklmnopqrstuvwxyz012345";
+    fs::write(
+        directory.path().join("config.txt"),
+        format!("OPENAI_API_KEY={raw}\n"),
+    )?;
+
+    let redact = blindfold(directory.path(), &["redact", "config.txt", "--trace"])?;
+    assert!(redact.status.success(), "{}", stderr(&redact));
+    assert!(!stdout(&redact).contains(raw));
+
+    let list = blindfold(directory.path(), &["trace", "list"])?;
+    assert!(list.status.success(), "{}", stderr(&list));
+    assert!(stdout(&list).contains("route=redact"));
+
+    let tail = blindfold(directory.path(), &["trace", "tail"])?;
+    let output = stdout(&tail);
+    assert!(tail.status.success(), "{}", stderr(&tail));
+    assert!(output.contains("activity: redact"));
+    assert!(output.contains("openai_api_key"));
+    assert!(!output.contains(raw));
+    Ok(())
+}
+
+#[test]
+fn global_trace_flag_can_appear_before_or_after_subcommand() -> Result<(), Box<dyn Error>> {
+    let first = TestDirectory::new()?;
+    let output = blindfold(first.path(), &["--trace", "doctor"])?;
+    assert!(!output.status.success());
+    let trace = blindfold(first.path(), &["trace", "tail"])?;
+    assert!(stdout(&trace).contains("doctor"));
+
+    let second = TestDirectory::new()?;
+    fs::write(
+        second.path().join("config.txt"),
+        "OPENAI_API_KEY=sk-proj-abcdefghijklmnopqrstuvwxyz012345\n",
+    )?;
+    let output = blindfold(second.path(), &["redact", "--trace", "config.txt"])?;
+    assert!(output.status.success(), "{}", stderr(&output));
+    let trace = blindfold(second.path(), &["trace", "tail"])?;
+    assert!(stdout(&trace).contains("redact"));
+    Ok(())
+}
+
 #[cfg(unix)]
 #[test]
 fn trace_rejects_symlinked_storage_without_printing_target() -> Result<(), Box<dyn Error>> {

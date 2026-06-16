@@ -1,11 +1,15 @@
+use std::collections::BTreeMap;
 use std::env;
 use std::fs;
 use std::io::{self, BufRead, Read, Write};
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
-use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::sync::{
+    Arc, Mutex,
+    atomic::{AtomicU64, Ordering},
+};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use atomic_write_file::AtomicWriteFile;
 use blindfold_core::{
@@ -29,7 +33,8 @@ use blindfold_proxy::{
 use blindfold_proxy::{SanitizedText as ProxySanitizedText, TraceSink as ProxyTraceSink};
 use blindfold_trace::{
     Category as TraceCategory, Coverage as TraceCoverage, Issue as TraceIssue,
-    Outcome as TraceOutcome, Record as TraceRecord, Route as TraceRoute, Store as TraceStore,
+    Outcome as TraceOutcome, Record as TraceRecord, Replacement as TraceReplacement,
+    Route as TraceRoute, Store as TraceStore,
 };
 use blindfold_vault::{
     AuditAction, AuditEvent, AuditLog, AuditOutcome, MasterKey, RotationPolicy, Scope, Vault,
@@ -41,9 +46,11 @@ use crate::{config, doctor};
 
 const MASTER_KEY_ENV: &str = "BLINDFOLD_MASTER_KEY";
 const BYPASS_ENV: &str = "BLINDFOLD_BYPASS";
+static NEXT_CLI_TRACE_ID: AtomicU64 = AtomicU64::new(1);
 
 pub(crate) async fn run() -> ExitCode {
     let matches = cli().get_matches();
+    let trace_enabled = matches.get_flag("trace");
     let root = match env::current_dir() {
         Ok(root) => root,
         Err(error) => {
@@ -55,20 +62,42 @@ pub(crate) async fn run() -> ExitCode {
     };
 
     match matches.subcommand() {
-        Some(("init", _)) => init(&root),
-        Some(("doctor", _)) => doctor_command(&root),
-        Some(("scan", args)) => scan_command(args),
-        Some(("redact", args)) => redact_command(args),
-        Some(("exec", args)) => exec_command(args),
-        Some(("policy", args)) => policy_command(args),
-        Some(("diff-check", args)) => diff_command(&root, args),
-        Some(("vault", args)) => vault_command(&root, args),
-        Some(("audit", _)) => audit_command(&root),
+        Some(("init", _)) => traced_command(&root, trace_enabled, TraceRoute::Init, || init(&root)),
+        Some(("doctor", _)) => traced_command(&root, trace_enabled, TraceRoute::Doctor, || {
+            doctor_command(&root)
+        }),
+        Some(("scan", args)) => scan_command(&root, args, trace_enabled),
+        Some(("redact", args)) => redact_command(&root, args, trace_enabled),
+        Some(("exec", args)) => traced_command(&root, trace_enabled, TraceRoute::Exec, || {
+            exec_command(args)
+        }),
+        Some(("policy", args)) => traced_command(&root, trace_enabled, TraceRoute::Policy, || {
+            policy_command(args)
+        }),
+        Some(("diff-check", args)) => {
+            traced_command(&root, trace_enabled, TraceRoute::DiffCheck, || {
+                diff_command(&root, args)
+            })
+        }
+        Some(("vault", args)) => traced_command(&root, trace_enabled, TraceRoute::Vault, || {
+            vault_command(&root, args)
+        }),
+        Some(("audit", _)) => traced_command(&root, trace_enabled, TraceRoute::Audit, || {
+            audit_command(&root)
+        }),
         Some(("trace", args)) => trace_command(&root, args),
-        Some(("proxy", args)) => proxy_command(args).await,
-        Some(("mcp", args)) => mcp_command(args),
-        Some(("run", args)) => run_agent_command(&root, args).await,
-        Some(("shell-init", args)) => shell_init_command(args),
+        Some(("proxy", args)) => {
+            traced_async_command(&root, trace_enabled, TraceRoute::Proxy, proxy_command(args)).await
+        }
+        Some(("mcp", args)) => {
+            traced_command(&root, trace_enabled, TraceRoute::Mcp, || mcp_command(args))
+        }
+        Some(("run", args)) => run_agent_command(&root, args, trace_enabled).await,
+        Some(("shell-init", args)) => {
+            traced_command(&root, trace_enabled, TraceRoute::ShellInit, || {
+                shell_init_command(args)
+            })
+        }
         _ => ExitCode::FAILURE,
     }
 }
@@ -80,6 +109,13 @@ fn cli() -> Command {
         .about("Let agents use secrets without seeing secrets")
         .subcommand_required(true)
         .arg_required_else_help(true)
+        .arg(
+            Arg::new("trace")
+                .long("trace")
+                .global(true)
+                .help("Record payload-free trace metadata for this invocation")
+                .action(ArgAction::SetTrue),
+        )
         .subcommand(Command::new("init").about("Create a safe default .blindfold.yaml"))
         .subcommand(Command::new("doctor").about("Check local Blindfold prerequisites"))
         .subcommand(
@@ -220,21 +256,21 @@ fn cli() -> Command {
         .subcommand(Command::new("audit").about("Print safe local audit JSON lines"))
         .subcommand(
             Command::new("trace")
-                .about("Inspect explicitly enabled payload-free request traces")
+                .about("Inspect explicitly enabled payload-free command/session/request traces")
                 .subcommand(
                     Command::new("list")
-                        .about("List retained request traces")
+                        .about("List retained trace records")
                         .arg(Arg::new("json").long("json").action(ArgAction::SetTrue)),
                 )
                 .subcommand(
                     Command::new("show")
-                        .about("Show one request trace")
+                        .about("Show one trace record")
                         .arg(Arg::new("request_id").required(true))
                         .arg(Arg::new("json").long("json").action(ArgAction::SetTrue)),
                 )
                 .subcommand(
                     Command::new("tail")
-                        .about("Show the most recent request trace")
+                        .about("Show the most recent trace record")
                         .arg(Arg::new("json").long("json").action(ArgAction::SetTrue)),
                 )
                 .subcommand(
@@ -289,12 +325,6 @@ fn cli() -> Command {
                         .value_parser(["claude", "codex", "opencode"]),
                 )
                 .arg(Arg::new("strict").long("strict").action(ArgAction::SetTrue))
-                .arg(
-                    Arg::new("trace")
-                        .long("trace")
-                        .help("Persist bounded payload-free request trace metadata")
-                        .action(ArgAction::SetTrue),
-                )
                 .arg(
                     Arg::new("anthropic")
                         .long("anthropic-upstream")
@@ -354,7 +384,33 @@ fn detectors() -> Result<DetectorSet, ExitCode> {
     DetectorSet::new().map_err(|error| fail(&error.to_string()))
 }
 
-fn scan_command(args: &ArgMatches) -> ExitCode {
+fn traced_command(
+    root: &Path,
+    trace_enabled: bool,
+    route: TraceRoute,
+    command: impl FnOnce() -> ExitCode,
+) -> ExitCode {
+    let code = command();
+    if trace_enabled && let Err(error) = append_command_trace(root, route, (0, 0), Vec::new()) {
+        return fail(&error.to_string());
+    }
+    code
+}
+
+async fn traced_async_command(
+    root: &Path,
+    trace_enabled: bool,
+    route: TraceRoute,
+    future: impl std::future::Future<Output = ExitCode>,
+) -> ExitCode {
+    let code = future.await;
+    if trace_enabled && let Err(error) = append_command_trace(root, route, (0, 0), Vec::new()) {
+        return fail(&error.to_string());
+    }
+    code
+}
+
+fn scan_command(root: &Path, args: &ArgMatches, trace_enabled: bool) -> ExitCode {
     let path = args
         .get_one::<String>("path")
         .map_or_else(|| PathBuf::from("."), PathBuf::from);
@@ -398,13 +454,20 @@ fn scan_command(args: &ArgMatches) -> ExitCode {
             report.limit_reached()
         );
     }
-    if scan_is_incomplete(&report) {
+    let code = if scan_is_incomplete(&report) {
         ExitCode::from(3)
     } else if report.files().is_empty() {
         ExitCode::SUCCESS
     } else {
         ExitCode::from(2)
+    };
+    if trace_enabled
+        && let Err(error) =
+            append_command_trace(root, TraceRoute::Scan, (report.bytes_read(), 0), Vec::new())
+    {
+        return fail(&error.to_string());
     }
+    code
 }
 
 fn scan_is_incomplete(report: &blindfold_detectors::ScanReport) -> bool {
@@ -448,7 +511,7 @@ fn print_scan_json(report: &blindfold_detectors::ScanReport) {
     );
 }
 
-fn redact_command(args: &ArgMatches) -> ExitCode {
+fn redact_command(root: &Path, args: &ArgMatches, trace_enabled: bool) -> ExitCode {
     let input = if let Some(path) = args.get_one::<String>("file") {
         match fs::read_to_string(path) {
             Ok(input) => input,
@@ -479,6 +542,12 @@ fn redact_command(args: &ArgMatches) -> ExitCode {
     );
     match redactor.redact(&input, options) {
         Ok(output) => {
+            if trace_enabled
+                && let Err(error) =
+                    append_redact_trace(root, &input, output.text(), output.findings())
+            {
+                return fail(&error.to_string());
+            }
             if let Some(path) = args.get_one::<String>("output") {
                 write_redacted_output(Path::new(path), output.text(), args.get_flag("force"))
             } else {
@@ -488,6 +557,34 @@ fn redact_command(args: &ArgMatches) -> ExitCode {
         }
         Err(error) => fail(&error.to_string()),
     }
+}
+
+fn append_redact_trace(
+    root: &Path,
+    input: &str,
+    output: &str,
+    findings: &[blindfold_detectors::Finding],
+) -> blindfold_trace::Result<()> {
+    let mut grouped = BTreeMap::<TraceCategory, u32>::new();
+    for finding in findings {
+        *grouped.entry(trace_category(finding.kind())).or_default() += 1;
+    }
+    let replacements = grouped
+        .into_iter()
+        .enumerate()
+        .map(|(index, (category, count))| {
+            TraceReplacement::new(format!("S{}", index + 1), category, "/input", count)
+        })
+        .collect::<blindfold_trace::Result<Vec<_>>>()?;
+    append_command_trace(
+        root,
+        TraceRoute::Redact,
+        (
+            u64::try_from(input.len()).unwrap_or(u64::MAX),
+            u64::try_from(output.len()).unwrap_or(u64::MAX),
+        ),
+        replacements,
+    )
 }
 
 fn write_redacted_output(path: &Path, contents: &str, force: bool) -> ExitCode {
@@ -769,14 +866,14 @@ fn trace_command(root: &Path, args: &ArgMatches) -> ExitCode {
                             print_trace_summary(record);
                         }
                         if records.is_empty() {
-                            println!("No request traces recorded.");
+                            println!("No trace records recorded.");
                         }
                         ExitCode::SUCCESS
                     }
                 }
                 "tail" => match records.last() {
                     Some(record) => print_trace_record(record, values.get_flag("json")),
-                    None => fail("no request traces recorded"),
+                    None => fail("no trace records recorded"),
                 },
                 "show" | "export" => {
                     let Some(request_id) = values.get_one::<String>("request_id") else {
@@ -799,6 +896,34 @@ fn trace_command(root: &Path, args: &ArgMatches) -> ExitCode {
 
 fn open_trace_store(root: &Path) -> blindfold_trace::Result<TraceStore> {
     TraceStore::open(root.join(".blindfold/trace.jsonl"), 1024 * 1024, 3)
+}
+
+fn append_command_trace(
+    root: &Path,
+    route: TraceRoute,
+    bytes: (u64, u64),
+    replacements: Vec<TraceReplacement>,
+) -> blindfold_trace::Result<()> {
+    let store = open_trace_store(root)?;
+    let record = TraceRecord::now(
+        next_trace_request_id(),
+        route,
+        TraceCoverage::Protected,
+        TraceOutcome::Observed,
+        bytes,
+        (0, 0),
+        replacements,
+        None,
+    )?;
+    store.append(&record)
+}
+
+fn next_trace_request_id() -> String {
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |duration| duration.as_nanos());
+    let sequence = NEXT_CLI_TRACE_ID.fetch_add(1, Ordering::Relaxed);
+    format!("req_{timestamp:x}_{sequence:x}")
 }
 
 fn print_trace_json_array(records: &[TraceRecord]) -> ExitCode {
@@ -828,10 +953,14 @@ fn print_trace_record(record: &TraceRecord, json: bool) -> ExitCode {
         };
     }
     println!("request: {}", record.request_id());
-    println!(
-        "route: agent -> blindfold -> {}",
-        trace_route_label(record.route())
-    );
+    if trace_is_provider_route(record.route()) {
+        println!(
+            "route: agent -> blindfold -> {}",
+            trace_route_label(record.route())
+        );
+    } else {
+        println!("activity: {}", trace_route_label(record.route()));
+    }
     println!("coverage: {}", trace_coverage_label(record.coverage()));
     let request = record.request_bytes();
     let response = record.response_bytes();
@@ -875,7 +1004,29 @@ const fn trace_route_label(route: TraceRoute) -> &'static str {
         TraceRoute::OpenAi => "openai",
         TraceRoute::Anthropic => "anthropic",
         TraceRoute::Unknown => "unknown",
+        TraceRoute::Redact => "redact",
+        TraceRoute::Scan => "scan",
+        TraceRoute::Exec => "exec",
+        TraceRoute::Policy => "policy",
+        TraceRoute::DiffCheck => "diff-check",
+        TraceRoute::Vault => "vault",
+        TraceRoute::Audit => "audit",
+        TraceRoute::Proxy => "proxy",
+        TraceRoute::Mcp => "mcp",
+        TraceRoute::RunClaude => "run:claude",
+        TraceRoute::RunCodex => "run:codex",
+        TraceRoute::RunOpencode => "run:opencode",
+        TraceRoute::Init => "init",
+        TraceRoute::Doctor => "doctor",
+        TraceRoute::ShellInit => "shell-init",
     }
+}
+
+const fn trace_is_provider_route(route: TraceRoute) -> bool {
+    matches!(
+        route,
+        TraceRoute::OpenAi | TraceRoute::Anthropic | TraceRoute::Unknown
+    )
 }
 
 const fn trace_coverage_label(coverage: TraceCoverage) -> &'static str {
@@ -888,6 +1039,7 @@ const fn trace_coverage_label(coverage: TraceCoverage) -> &'static str {
 
 const fn trace_outcome_label(outcome: TraceOutcome) -> &'static str {
     match outcome {
+        TraceOutcome::Observed => "observed",
         TraceOutcome::Succeeded => "succeeded",
         TraceOutcome::Rejected => "rejected",
         TraceOutcome::Failed => "failed",
@@ -1047,7 +1199,8 @@ fn read_bounded_line<R: BufRead>(
     }
 }
 
-async fn run_agent_command(root: &Path, args: &ArgMatches) -> ExitCode {
+#[allow(clippy::too_many_lines)] // Agent startup and shutdown sequence is clearest in order.
+async fn run_agent_command(root: &Path, args: &ArgMatches, trace_enabled: bool) -> ExitCode {
     let agent = args
         .get_one::<String>("agent")
         .map_or("claude", String::as_str);
@@ -1078,11 +1231,7 @@ async fn run_agent_command(root: &Path, args: &ArgMatches) -> ExitCode {
     eprintln!("- provider credential broker: unavailable; use the agent credential store");
     eprintln!(
         "- payload-free request tracing: {}",
-        if args.get_flag("trace") {
-            "enabled"
-        } else {
-            "disabled"
-        }
+        if trace_enabled { "enabled" } else { "disabled" }
     );
     eprintln!("- one-run opt-out: --no-proxy or {BYPASS_ENV}=1");
 
@@ -1116,7 +1265,7 @@ async fn run_agent_command(root: &Path, args: &ArgMatches) -> ExitCode {
         Ok(proxy) => proxy,
         Err(error) => return fail(&error.to_string()),
     };
-    let trace_sink = if args.get_flag("trace") {
+    let trace_sink = if trace_enabled {
         let store = match open_trace_store(root) {
             Ok(store) => store,
             Err(error) => return fail(&error.to_string()),
@@ -1147,9 +1296,23 @@ async fn run_agent_command(root: &Path, args: &ArgMatches) -> ExitCode {
     if trace_sink.is_some_and(|sink| sink.failed()) {
         return fail("one or more request traces could not be persisted safely");
     }
+    if trace_enabled
+        && let Err(error) = append_command_trace(root, run_trace_route(agent), (0, 0), Vec::new())
+    {
+        return fail(&error.to_string());
+    }
     match status {
         Ok(status) => exit_from_code(status.code()),
         Err(error) => fail(&format!("could not run agent: {}", error.kind())),
+    }
+}
+
+const fn run_trace_route(agent: &str) -> TraceRoute {
+    match agent.as_bytes() {
+        b"claude" => TraceRoute::RunClaude,
+        b"codex" => TraceRoute::RunCodex,
+        b"opencode" => TraceRoute::RunOpencode,
+        _ => TraceRoute::Unknown,
     }
 }
 

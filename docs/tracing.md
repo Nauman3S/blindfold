@@ -1,9 +1,11 @@
 # Request Tracing
 
-Blindfold tracing explains managed proxy behavior without creating a payload log.
-It is disabled unless `--trace` is supplied to `blindfold run` or `bf run`.
+Blindfold tracing explains command and managed proxy behavior without creating a payload
+log. It is disabled unless the global `--trace` flag is supplied.
 
 ```sh
+bf --trace doctor
+bf redact .env --trace
 bf run claude --trace
 bf trace list
 bf trace show req_...
@@ -17,10 +19,10 @@ bf trace clear --yes
 Each version 1 record contains:
 
 - an operation-local request ID;
-- provider route;
+- command/session activity or provider route;
 - protected, degraded, or unprotected coverage;
-- succeeded, rejected, failed, or timed-out outcome;
-- request and response byte counts before and after sanitization;
+- observed, succeeded, rejected, failed, or timed-out outcome;
+- input/output byte counts before and after sanitization where applicable;
 - operation-local replacement IDs such as `S1`;
 - closed detector categories;
 - sanitized JSON pointers; arbitrary object keys become `*`;
@@ -62,5 +64,7 @@ follow the file.
   limit, format, or upstream issue.
 - `unprotected`: Blindfold rejected the exchange before establishing inspected traffic.
 
-Tracing describes only requests that reach the managed local proxy. Direct filesystem or
+Command-level records describe Blindfold commands that ran with `--trace`, such as
+`redact`, `scan`, `doctor`, `exec`, or `run:codex`. Agent sessions also emit provider
+request records for traffic that reaches the managed local proxy. Direct filesystem or
 network bypasses remain outside this trace boundary.

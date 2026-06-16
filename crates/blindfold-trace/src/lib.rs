@@ -37,7 +37,7 @@ impl std::fmt::Display for Error {
 
 impl std::error::Error for Error {}
 
-/// Provider route for one managed exchange.
+/// Closed command activity or provider route for one trace record.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Route {
@@ -47,6 +47,36 @@ pub enum Route {
     Anthropic,
     /// A request did not match an allowlisted provider route.
     Unknown,
+    /// A local file/stdin redaction operation.
+    Redact,
+    /// A repository or file scan operation.
+    Scan,
+    /// A local explicit-secret execution operation.
+    Exec,
+    /// A policy inspection operation.
+    Policy,
+    /// A generated-diff inspection operation.
+    DiffCheck,
+    /// A vault operation.
+    Vault,
+    /// An audit inspection operation.
+    Audit,
+    /// A standalone proxy operation.
+    Proxy,
+    /// An MCP stdio operation.
+    Mcp,
+    /// A Claude Code wrapper session.
+    RunClaude,
+    /// A Codex wrapper session.
+    RunCodex,
+    /// An `OpenCode` wrapper session.
+    RunOpencode,
+    /// A project initialization operation.
+    Init,
+    /// A local diagnostic operation.
+    Doctor,
+    /// A shell wrapper generation operation.
+    ShellInit,
 }
 
 /// How completely Blindfold inspected one exchange.
@@ -65,6 +95,8 @@ pub enum Coverage {
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Outcome {
+    /// Blindfold observed a local command invocation.
+    Observed,
     /// Request and response completed through the managed proxy.
     Succeeded,
     /// Blindfold rejected the exchange.
@@ -236,7 +268,7 @@ impl Replacement {
     }
 }
 
-/// One payload-free managed proxy exchange.
+/// One payload-free command, session, or provider-request trace record.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Record {
@@ -306,7 +338,7 @@ impl Record {
         self.timestamp
     }
 
-    /// Returns the provider route.
+    /// Returns the command activity or provider route.
     #[must_use]
     pub const fn route(&self) -> Route {
         self.route

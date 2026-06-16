@@ -9,7 +9,7 @@ This is the short guide. You do not need to learn every Blindfold command.
 | Start Codex with Blindfold | `blindfold run codex` |
 | Start Claude with Blindfold | `blindfold run claude` |
 | Start OpenCode with Blindfold | `blindfold run opencode` |
-| Trace a managed agent request | `bf run codex --trace` |
+| Trace a command or agent session | `bf redact .env --trace` |
 | Inspect the latest trace | `bf trace tail` |
 | Temporarily run an agent without Blindfold | `blindfold run codex --no-proxy` |
 | Check a project for secrets | `blindfold scan .` |
@@ -78,7 +78,13 @@ blindfold run opencode -- run "find the failing test"
 
 ## Use Case 3: Trace What Blindfold Protected
 
-Tracing is off unless you request it:
+Tracing is off unless you request it. Trace a single command:
+
+```sh
+bf redact .env --trace
+```
+
+Trace a Codex session and its managed provider requests:
 
 ```sh
 bf run codex --trace
@@ -98,7 +104,9 @@ Export one versioned metadata record for a bug report:
 bf trace export req_... --redacted
 ```
 
-The export contains no payload preview, headers, query string, or raw detected value.
+The export tells you whether the record came from a local command, a Codex/Claude/OpenCode
+session, or a provider request. It contains no payload preview, headers, query string, or
+raw detected value.
 Delete trace metadata independently:
 
 ```sh

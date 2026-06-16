@@ -300,9 +300,11 @@ agent-specific routing behavior.
 
 ## Request Tracing
 
-Tracing is disabled by default. Enable payload-free metadata for one managed agent run:
+Tracing is disabled by default. Enable payload-free metadata for a single command or a
+managed agent session:
 
 ```sh
+bf redact .env --trace
 bf run claude --trace
 ```
 
@@ -316,11 +318,11 @@ bf trace export req_... --redacted
 bf trace clear --yes
 ```
 
-Trace records contain request IDs, provider route, coverage status, before/after byte
-counts, detector categories, sanitized structural pointers, occurrence counts, outcomes,
-and closed issue codes. They never contain request or response payloads, authorization
-headers, query strings, original spans, or arbitrary messages. Storage is owner-only,
-bounded, rotated, schema-validated, and independent from vault audit data.
+Trace records contain request IDs, command/session activity or provider route, coverage
+status, before/after byte counts, detector categories, sanitized structural pointers,
+occurrence counts, outcomes, and closed issue codes. They never contain payloads,
+authorization headers, query strings, original spans, or arbitrary messages. Storage is
+owner-only, bounded, rotated, schema-validated, and independent from vault audit data.
 
 There is intentionally no raw trace mode. See [Request tracing](docs/tracing.md) for the
 schema and limitations.
