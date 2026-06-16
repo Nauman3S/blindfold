@@ -13,16 +13,6 @@ blindfold run opencode -- run "inspect this project"
 
 Arguments after `--` are passed to the native agent unchanged.
 
-For file-inspection tasks that may touch secrets, launch from a temporary redacted copy:
-
-```sh
-blindfold run opencode --redacted-worktree --trace
-```
-
-Then ask the agent to use relative paths, such as `read .env`. The agent cwd is the
-redacted copy, so relative file reads see sanitized content. Absolute paths to the
-original project are still outside Blindfold until filesystem sandboxing is implemented.
-
 The default upstreams are:
 
 - Claude and OpenCode Anthropic: `https://api.anthropic.com`
@@ -101,13 +91,11 @@ not currently sanitize interactive terminal output, broker provider credentials,
 prevent direct filesystem and network access. `--strict` therefore refuses to start
 instead of claiming those controls exist.
 
-Plain agent file reads are not mediated. If an agent opens `.env`, `.env.local`, or any
-other project file directly from the real project, it reads the file from disk exactly
-as stored. Use `--redacted-worktree` for relative file-read tasks, `blindfold redact
-FILE` for one-off inspection, or `blindfold exec` for controlled child-process secret
-injection. Plain `run --trace` records the session as degraded with
-`direct_filesystem_unmediated`; `--redacted-worktree --trace` records
-`agent_boundary_degraded` because some bypasses still remain.
+Agent file reads are not mediated. If an agent opens `.env`, `.env.local`, or any other
+project file directly, it reads the file from disk exactly as stored. Use `blindfold
+redact FILE` for one-off inspection or `blindfold exec` for controlled child-process
+secret injection. `run --trace` records the session as degraded with
+`direct_filesystem_unmediated`; it does not redact direct file reads.
 
 OpenCode providers other than `openai` and `anthropic` are not routed through Blindfold.
 Managed OpenCode settings may also override runtime configuration; verify organizational

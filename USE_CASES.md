@@ -69,15 +69,6 @@ blindfold run claude
 blindfold run opencode
 ```
 
-Use a redacted worktree when the agent needs to read files that might contain secrets:
-
-```sh
-blindfold run opencode --redacted-worktree --trace
-```
-
-Then ask for relative paths, for example `read .env`. Do not give the agent an absolute
-path to the original project for sensitive files; that is still a normal OS read.
-
 Examples with native arguments:
 
 ```sh
@@ -99,12 +90,9 @@ Trace a Codex session and its managed provider requests:
 bf run codex --trace
 ```
 
-Plain traced agent runs do not redact direct file reads. If the agent opens `.env` from
-the real project, it can see the raw file. Use `--redacted-worktree` when the agent
-needs to inspect sensitive project files by relative path. Plain runs trace as
-`direct_filesystem_unmediated`; redacted-worktree runs trace as
-`agent_boundary_degraded` because absolute original-project paths and unmanaged network
-bypasses remain outside Blindfold.
+Traced agent runs do not redact direct file reads. If the agent opens `.env` from the
+project, it can see the raw file. The trace marks the session as degraded with
+`direct_filesystem_unmediated`; only managed provider requests are sanitized.
 
 After the agent makes provider requests:
 

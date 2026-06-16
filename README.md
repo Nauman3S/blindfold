@@ -255,17 +255,6 @@ blindfold run codex -- review
 blindfold run opencode -- run "inspect this project"
 ```
 
-Run an agent from a temporary redacted copy when you want it to read files that may
-contain secrets:
-
-```sh
-blindfold run opencode --redacted-worktree --trace
-```
-
-In that mode, relative reads such as `read .env` happen inside the redacted copy. Do not
-give the agent absolute paths to the original project for sensitive files; those paths
-are still normal OS file reads until Blindfold has a real filesystem sandbox.
-
 No persistent Claude, Codex, or OpenCode configuration is changed. Managed wrappers
 start the agent with an allowlisted environment, so parent API-key variables and
 unrelated secrets are not inherited. Authenticate the agent with its persistent
@@ -302,12 +291,11 @@ sanitizes supported provider traffic, but not interactive terminal output, and i
 prevent direct filesystem or network bypasses. `--strict` refuses to start while those
 controls remain unavailable.
 
-Important: plain `blindfold run ... --trace` does not mediate agent file reads. If
-OpenCode, Codex, or Claude opens `.env` directly from the real project, it can read the
-raw file. Use `--redacted-worktree` for relative file-read tasks. Trace records mark
-plain sessions as degraded with `direct_filesystem_unmediated`; redacted-worktree
-sessions are still degraded because absolute original-project paths and unmanaged
-network bypasses remain outside Blindfold.
+Important: `blindfold run ...` does not mediate agent file reads. If OpenCode, Codex,
+or Claude opens `.env` directly from the project, it can read the raw file. Trace
+records mark agent sessions as degraded with `direct_filesystem_unmediated`; only
+traffic that passes through Blindfold's managed provider proxy is sanitized. Full
+file-read protection requires future filesystem mediation or sandboxing.
 
 Automatic PII detection is not implemented. The TypeScript SDK restores only PII values
 that the application explicitly supplies to it; this is not repository or traffic PII

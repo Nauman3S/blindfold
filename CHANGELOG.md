@@ -37,8 +37,6 @@ project follows Semantic Versioning as described in
 
 ### Fixed
 
-- Agent wrappers can now launch from `--redacted-worktree` so relative project-file
-  reads see a temporary sanitized copy instead of raw secret-bearing files.
 - Traced agent sessions now explicitly report unmediated direct filesystem access
   instead of implying the whole session is protected.
 - Managed coding-agent wrappers no longer inherit the parent secret environment.
