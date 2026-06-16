@@ -565,15 +565,22 @@ fn append_redact_trace(
     output: &str,
     findings: &[blindfold_detectors::Finding],
 ) -> blindfold_trace::Result<()> {
-    let mut grouped = BTreeMap::<TraceCategory, u32>::new();
+    let mut grouped = BTreeMap::<(TraceCategory, String), u32>::new();
+    let dotenv_ranges = dotenv_value_ranges(input);
     for finding in findings {
-        *grouped.entry(trace_category(finding.kind())).or_default() += 1;
+        let pointer = dotenv_ranges
+            .iter()
+            .find(|field| field.range_contains(finding.span().start()))
+            .map_or_else(|| "/input".to_owned(), DotenvFieldRange::pointer);
+        *grouped
+            .entry((trace_category(finding.kind()), pointer))
+            .or_default() += 1;
     }
     let replacements = grouped
         .into_iter()
         .enumerate()
-        .map(|(index, (category, count))| {
-            TraceReplacement::new(format!("S{}", index + 1), category, "/input", count)
+        .map(|(index, ((category, pointer), count))| {
+            TraceReplacement::new(format!("S{}", index + 1), category, pointer, count)
         })
         .collect::<blindfold_trace::Result<Vec<_>>>()?;
     append_command_trace(
@@ -585,6 +592,71 @@ fn append_redact_trace(
         ),
         replacements,
     )
+}
+
+struct DotenvFieldRange {
+    name: String,
+    value_start: usize,
+    value_end: usize,
+}
+
+impl DotenvFieldRange {
+    const fn range_contains(&self, offset: usize) -> bool {
+        self.value_start <= offset && offset < self.value_end
+    }
+
+    fn pointer(&self) -> String {
+        format!("/env/{}", self.name)
+    }
+}
+
+fn dotenv_value_ranges(input: &str) -> Vec<DotenvFieldRange> {
+    let mut ranges = Vec::new();
+    let mut offset = 0;
+    for line_with_ending in input.split_inclusive('\n') {
+        let line = line_with_ending
+            .strip_suffix('\n')
+            .unwrap_or(line_with_ending);
+        if let Some(range) = dotenv_value_range(line, offset) {
+            ranges.push(range);
+        }
+        offset += line_with_ending.len();
+    }
+    ranges
+}
+
+fn dotenv_value_range(line: &str, line_offset: usize) -> Option<DotenvFieldRange> {
+    let assignment_start = line.bytes().position(|byte| !byte.is_ascii_whitespace())?;
+    let assignment = line[assignment_start..]
+        .strip_prefix("export ")
+        .unwrap_or(&line[assignment_start..]);
+    let name_start = line.len() - assignment.len();
+    let equals = assignment.find('=')?;
+    let name = assignment[..equals].trim();
+    if !valid_trace_env_name(name) {
+        return None;
+    }
+    let raw_value = &assignment[equals + 1..];
+    let leading_value_spaces = raw_value
+        .bytes()
+        .take_while(u8::is_ascii_whitespace)
+        .count();
+    let value_start = line_offset + name_start + equals + 1 + leading_value_spaces;
+    let value_end = line_offset + line.len();
+    Some(DotenvFieldRange {
+        name: name.to_owned(),
+        value_start,
+        value_end,
+    })
+}
+
+fn valid_trace_env_name(name: &str) -> bool {
+    let mut bytes = name.bytes();
+    let Some(first) = bytes.next() else {
+        return false;
+    };
+    (first.is_ascii_alphabetic() || first == b'_')
+        && bytes.all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
 }
 
 fn write_redacted_output(path: &Path, contents: &str, force: bool) -> ExitCode {

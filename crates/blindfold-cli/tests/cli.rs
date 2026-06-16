@@ -168,7 +168,33 @@ fn redact_trace_populates_trace_list_and_tail() -> Result<(), Box<dyn Error>> {
     assert!(tail.status.success(), "{}", stderr(&tail));
     assert!(output.contains("activity: redact"));
     assert!(output.contains("openai_api_key"));
+    assert!(output.contains("/env/OPENAI_API_KEY"));
     assert!(!output.contains(raw));
+    Ok(())
+}
+
+#[test]
+fn redact_trace_names_dotenv_variable_without_value() -> Result<(), Box<dyn Error>> {
+    let directory = TestDirectory::new()?;
+    let raw = "postgresql://blindfold_fake:BLINDFOLD_FAKE_FIXTURE@127.0.0.1:55432/blindfold_test";
+    fs::write(
+        directory.path().join("application.env"),
+        format!("APP_ENV=test\nDATABASE_URL={raw}\n"),
+    )?;
+
+    let redact = blindfold(directory.path(), &["redact", "--trace", "application.env"])?;
+    assert!(redact.status.success(), "{}", stderr(&redact));
+    assert!(!stdout(&redact).contains(raw));
+
+    let show_without_id = blindfold(directory.path(), &["trace", "show"])?;
+    assert!(!show_without_id.status.success());
+    let tail = blindfold(directory.path(), &["trace", "tail"])?;
+    let output = stdout(&tail);
+    assert!(tail.status.success(), "{}", stderr(&tail));
+    assert!(output.contains("credential_url"));
+    assert!(output.contains("/env/DATABASE_URL"));
+    assert!(!output.contains(raw));
+    assert!(!output.contains("BLINDFOLD_FAKE_FIXTURE@"));
     Ok(())
 }
 

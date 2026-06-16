@@ -25,7 +25,8 @@ Each version 1 record contains:
 - input/output byte counts before and after sanitization where applicable;
 - operation-local replacement IDs such as `S1`;
 - closed detector categories;
-- sanitized JSON pointers; arbitrary object keys become `*`;
+- sanitized structural pointers, such as `/env/DATABASE_URL` or JSON pointers where
+  applicable; arbitrary object keys become `*`;
 - replacement occurrence counts; and
 - a closed issue code when coverage is not protected.
 

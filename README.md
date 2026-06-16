@@ -319,7 +319,8 @@ bf trace clear --yes
 ```
 
 Trace records contain request IDs, command/session activity or provider route, coverage
-status, before/after byte counts, detector categories, sanitized structural pointers,
+status, before/after byte counts, detector categories, sanitized structural pointers
+such as `/env/DATABASE_URL`,
 occurrence counts, outcomes, and closed issue codes. They never contain payloads,
 authorization headers, query strings, original spans, or arbitrary messages. Storage is
 owner-only, bounded, rotated, schema-validated, and independent from vault audit data.
