@@ -1,6 +1,6 @@
 # Blindfold Build Plan
 
-> Let agents use secrets without seeing secrets.
+> Let agents use secrets without leaking secrets.
 
 ## How to Use This Plan
 
@@ -17,6 +17,50 @@ Blindfold. Keep it updated as decisions are made and work is completed.
 | Primary integration | Claude Code, Codex CLI, and OpenCode degraded wrappers |
 | Implementation language | Rust 1.96.0, edition 2024 |
 | License | Apache License 2.0 |
+
+### Architecture Delta: Guard First, Strict Later
+
+This plan supersedes earlier wording that implied `blindfold run` can make an
+unmodified local agent unable to read local files. It cannot. If OpenCode, Claude Code,
+Codex, or another agent runs normally in the real project, the agent process can read
+files that the current user can read.
+
+Blindfold's product promise must be split by mode:
+
+| Mode | Agent can read local files? | LLM/provider sees secrets? | Requires container/sandbox? |
+|---|---:|---:|---:|
+| `scan` | yes | n/a | no |
+| `proxy` | yes | no, if traffic is routed through Blindfold | no |
+| `guard` | yes | no for managed LLM traffic; direct LLM egress should be blocked | no |
+| `strict` | no raw secret workspace by design | no | yes |
+
+Guard mode is the practical v1 wedge:
+
+```sh
+bf run --guard opencode
+```
+
+In guard mode the agent works in the real repository. Blindfold configures supported
+agents to send OpenAI-compatible, Anthropic-compatible, OpenRouter, or other configured
+LLM traffic through the local redaction proxy. The egress guard should block direct
+known-provider traffic that bypasses Blindfold. Guard mode protects outbound managed
+LLM traffic; it does not protect local file reads, local agent logs, or network clients
+that ignore proxy settings.
+
+Strict mode is the later stronger promise:
+
+```sh
+bf run --strict opencode
+```
+
+Strict mode must use a container or OS sandbox with a managed workspace, fake home,
+sanitized environment, blocked direct provider egress, and brokered secret access. Only
+strict mode may claim that the agent process cannot see raw secrets in its filesystem or
+environment.
+
+Do not reintroduce a temporary copied worktree as default guard behavior. It changes how
+agents use Git, worktrees, submodules, generated files, and edits. Any managed workspace
+belongs under strict mode with an explicit patch/apply flow.
 
 ### Task Status Legend
 
@@ -41,20 +85,22 @@ Blindfold. Keep it updated as decisions are made and work is completed.
 ## 1. Project Summary
 
 Name: Blindfold
-Tagline: Let agents use secrets without seeing secrets.
+Tagline: Let agents use secrets without leaking secrets.
 
 Blindfold is a local-first privacy and secrets boundary for AI coding agents.
 
 It aims to let Claude Code, Codex, Cursor, MCP tools, and custom agents work with real
-projects while reducing disclosure of detected credentials on explicitly managed paths.
-Automatic PII discovery and whole-agent containment are not currently implemented.
+projects while reducing disclosure of detected credentials on explicitly managed
+outbound paths. Automatic PII discovery, arbitrary local file-read mediation, and
+whole-agent containment are not currently implemented.
 
 The core idea:
 
-Agent can use secrets.
-Agent cannot see secrets.
-Agent can call APIs.
-Agent cannot print, log, paste, or send raw keys to LLMs.
+In guard mode, the agent can read local files, but Blindfold prevents detected secrets
+from being sent through managed LLM/provider traffic.
+
+In strict mode, the agent runs in a managed workspace where raw secrets are absent and
+secret use goes through Blindfold's broker.
 
 Blindfold should start with Claude Code support, but the architecture must be agent-agnostic.
 
@@ -116,8 +162,8 @@ No agent can ever bypass it.
 
 Instead, be honest:
 
-Blindfold protects traffic and tools routed through Blindfold.
-Strict mode can sandbox agents to prevent direct bypasses.
+Blindfold guard mode protects traffic and tools routed through Blindfold.
+Strict mode can sandbox agents to prevent direct filesystem and environment bypasses.
 
 ---
 
@@ -130,7 +176,7 @@ Claude Code / Codex / Cursor / Custom
 Blindfold Boundary
         |
         +-- LLM Proxy
-        +-- File Read Proxy
+        +-- Egress Guard
         +-- Shell/Command Proxy
         +-- MCP Proxy
         +-- Detector Engine
@@ -138,6 +184,7 @@ Blindfold Boundary
         +-- Local Vault
         +-- Policy Engine
         +-- Audit Log
+        +-- Strict Workspace Runner
         |
         v
 LLM Provider / Local Model / Tools / Shell / APIs
@@ -165,20 +212,26 @@ Primary commands:
 
 blindfold init
 blindfold doctor
-blindfold run claude
-blindfold run codex
+blindfold run --guard claude
+blindfold run --guard codex
+blindfold run --guard opencode
+blindfold run --strict opencode
 blindfold proxy
 blindfold scan .
 blindfold redact .env
 blindfold exec --secret STRIPE_SECRET_KEY -- npm test
+blindfold call --secret STRIPE_SECRET_KEY --url https://api.stripe.com/v1/customers
 blindfold audit
+blindfold status
+blindfold allow domain api.example.com
+blindfold deny domain suspicious.example.com
 blindfold policy check
 blindfold mcp
 
 Initial priority:
 
 blindfold init
-blindfold run claude
+blindfold run --guard opencode
 blindfold scan .
 blindfold exec --secret NAME -- command
 
@@ -187,19 +240,22 @@ The first release must feel simple.
 Good first-run UX:
 
 blindfold init
-blindfold run claude
+blindfold run --guard opencode
 
 Output example:
 
-Blindfold active.
+Blindfold Guard active.
 Protected:
-- .env files
-- API keys
-- database URLs
-- private keys
-- shell output
-- LLM requests
+- LLM requests routed through Blindfold
+- OpenAI/Anthropic/OpenRouter provider bodies redacted when routed
+- Direct known-provider egress blocked when the egress guard is active
+Not protected:
+- Local file reads by the agent
+- Agent local logs
+- Network clients that ignore proxy settings
 Mode: balanced
+
+Use `--strict` for workspace isolation.
 
 ### 5.2 Local LLM Proxy
 
@@ -209,11 +265,14 @@ Support initially:
 
 OpenAI-compatible API
 Anthropic-compatible API
+OpenRouter/OpenAI-compatible routing
 
 Later:
 
 Ollama-compatible API
 Gemini-compatible API
+Mistral-compatible API
+Groq-compatible API
 generic HTTP CONNECT proxy
 
 The proxy must:
@@ -234,6 +293,36 @@ Important:
 * Support streaming responses.
 * For streaming, scan with chunk overlap so secrets split across chunks are still detected.
 * Never log raw prompt or raw response by default.
+* Do not install a root CA or claim arbitrary HTTPS body inspection in v1.
+
+### 5.2.1 Egress Network Guard
+
+The egress guard controls outbound network destinations. It should not try to redact
+arbitrary encrypted HTTPS bodies by default.
+
+Default approach:
+
+1. Run an explicit local HTTP/HTTPS proxy on `127.0.0.1:8789`.
+2. Set `HTTP_PROXY`, `HTTPS_PROXY`, and compatible proxy variables for the agent.
+3. Set provider base URLs so known LLM traffic uses the Blindfold LLM proxy.
+4. Block direct `CONNECT` traffic to known LLM providers such as:
+   - `api.openai.com`
+   - `api.anthropic.com`
+   - `openrouter.ai`
+   - `generativelanguage.googleapis.com`
+   - `api.mistral.ai`
+   - `api.groq.com`
+5. Allow common development domains by policy, such as GitHub, npm, PyPI, crates.io,
+   and Go module mirrors.
+6. Ask or block unknown domains according to project policy.
+
+Important:
+
+* No default TLS MITM.
+* If Blindfold cannot inspect the body, it controls by destination policy.
+* Known LLM APIs should use the application-aware LLM proxy, not generic MITM.
+* Network clients that ignore proxy environment variables remain outside guard mode
+  until strict/container networking is implemented.
 
 ### 5.3 Detector Engine
 
@@ -706,8 +795,10 @@ blindfold/
     blindfold-policy/
     blindfold-vault/
     blindfold-proxy/
+    blindfold-egress-guard/
     blindfold-exec/
     blindfold-mcp/
+    blindfold-strict-runner/
   examples/
     claude-code-basic/
     node-stripe-demo/
@@ -746,7 +837,7 @@ Default config file:
 Example:
 
 version: 1
-mode: balanced
+mode: guard
 redaction:
   secrets:
     mode: env-ref
@@ -774,8 +865,38 @@ audit:
   store_raw_values: false
 llm:
   proxy:
+    listen: "127.0.0.1:8787"
     openai: true
     anthropic: true
+    openrouter: true
+network:
+  guard:
+    enabled: true
+    listen: "127.0.0.1:8789"
+  llm_providers:
+    direct: block
+    via_blindfold_proxy: allow
+  allow:
+    - github.com
+    - api.github.com
+    - registry.npmjs.org
+    - pypi.org
+    - files.pythonhosted.org
+    - crates.io
+    - static.crates.io
+    - index.crates.io
+    - proxy.golang.org
+    - sum.golang.org
+  ask:
+    - "*.company.com"
+    - localhost
+    - 127.0.0.1
+  block_unknown: true
+strict:
+  engine: docker
+  workspace: managed-copy
+  mount_home: false
+  network: guarded
 
 Support local overrides:
 
@@ -792,7 +913,7 @@ Do not commit local override by default.
 The critical path is:
 
 `P0 Foundation -> P1 Detection -> P2 Policy/SafeRefs -> P3 Vault -> P4 Proxy
--> P5 Exec -> P6 Claude wrapper -> P7 Release hardening`
+-> P4B Egress Guard -> P5 Exec -> P6 Guard Mode Runner -> P7 Release hardening`
 
 The generated diff scanner and MCP proxy can begin after P2, but neither may delay the
 `v0.1.0` critical path unless a release gate depends on it.
@@ -809,8 +930,9 @@ format. Add a blocker link or note whenever status is `[!]`.
 | P2 | SafeRefs and policy | `[~]` | Codex | TBD | P1 | `V-13`, `V-14` |
 | P3 | Encrypted vault and audit | `[~]` | Codex | TBD | P2 | `V-06`, `V-10` |
 | P4 | Local LLM proxy | `[~]` | Codex | TBD | P1-P3 | `V-07`, `V-11` |
+| P4B | Egress network guard | `[ ]` | Codex | TBD | P4 | Phase exit criteria |
 | P5 | Secret execution runtime | `[~]` | Codex | TBD | P1-P3 | `V-06`, `V-12` |
-| P6 | Claude Code wrapper MVP | `[~]` | Codex | TBD | P4-P5 | `V-05` |
+| P6 | Guard mode agent runner | `[~]` | Codex | TBD | P4-P5, P4B for full guard | `V-05` |
 | P7 | Release hardening | `[~]` | Codex | TBD | P0-P6 | `V-01` through `V-18` |
 | P8 | Generated diff scanner | `[~]` | Codex | TBD | P2 | Phase exit criteria |
 | P9 | MCP proxy | `[~]` | Codex | Backlog | P2-P4 | Phase exit criteria |
@@ -1041,6 +1163,40 @@ returns to the agent.
   bodies.
 - [x] Unsupported payloads fail with a clear, safe error rather than bypassing scans.
 
+### Phase 4B: Egress Network Guard
+
+**Goal:** Make guard mode control outbound destinations so direct known-provider calls
+do not bypass the LLM redaction proxy.
+
+**Depends on:** P4
+
+**Required tasks:**
+
+- [ ] `P4B-01` Implement an explicit local egress proxy on `127.0.0.1:8789`.
+- [ ] `P4B-02` Set `HTTP_PROXY`, `HTTPS_PROXY`, compatible proxy variables, and
+  `NO_PROXY` for guarded agent processes.
+- [ ] `P4B-03` Block direct `CONNECT` traffic to known LLM providers, including
+  OpenAI, Anthropic, OpenRouter, Gemini, Mistral, and Groq.
+- [ ] `P4B-04` Allow common package and development registries by default policy.
+- [ ] `P4B-05` Implement unknown-domain ask/block behavior with project-scoped allow
+  and deny decisions.
+- [ ] `P4B-06` Add `bf allow domain ...`, `bf deny domain ...`, and `bf status`
+  commands or equivalent policy subcommands.
+- [ ] `P4B-07` Log/audit destination decisions without request bodies, headers, query
+  strings, or raw secrets.
+- [ ] `P4B-08` Document that v1 does not install a root CA and does not inspect
+  arbitrary encrypted HTTPS bodies.
+
+**Exit criteria:**
+
+- [ ] Direct `CONNECT api.openai.com:443`, `api.anthropic.com:443`, and
+  `openrouter.ai:443` are blocked outside the Blindfold LLM proxy path.
+- [ ] `registry.npmjs.org`, `pypi.org`, `crates.io`, GitHub, and Go module mirrors
+  are allowed by default policy.
+- [ ] Unknown domains ask or block according to `.blindfold.yaml`.
+- [ ] Egress guard logs and traces contain no raw payloads.
+- [ ] Startup output for guard mode clearly reports direct-provider blocking status.
+
 ### Phase 5: Secret Execution Runtime
 
 **Goal:** Run a local process with selected secrets while returning only sanitized
@@ -1080,24 +1236,29 @@ output to the caller.
 - [x] Exit codes and signals behave like direct command execution.
 - [x] Only explicitly approved secrets and environment variables reach the child.
 
-### Phase 6: Claude Code Wrapper MVP
+### Phase 6: Guard Mode Agent Runner
 
-**Goal:** Provide a one-command Claude Code experience with an accurately described
+**Goal:** Provide one-command `bf run --guard claude|codex|opencode` experience with
+managed LLM proxy routing, egress guard configuration, and an accurately described
 protection boundary.
 
-**Depends on:** P4 and P5
+**Depends on:** P4 and P5. Full guard mode depends on P4B.
 
 **Required tasks:**
 
 - [~] `P6-01` Spike Claude Code's supported proxy/base-URL, hook, MCP, and environment
   integration points; record exact protected and unprotected paths.
-- [x] `P6-02` Implement `blindfold run claude|codex|opencode` with native trailing
-  arguments and per-run opt-out.
+- [x] `P6-02` Implement `blindfold run --guard claude|codex|opencode` with native
+  trailing arguments and per-run opt-out. Preserve current shorthand only as a
+  compatibility path if needed.
 - [x] `P6-03` Start and health-check the local proxy, configure the child agent, and
   clean up on exit.
+- [ ] `P6-03B` Configure OpenRouter/OpenAI-compatible routing when selected by config.
+- [ ] `P6-03C` Start and configure the egress guard once P4B exists.
 - [!] `P6-04` Sanitize wrapper-managed stdout/stderr.
 - [!] `P6-05` Protect supported file/tool reads through documented hooks or broker
-  integration; do not claim interception where none exists.
+  integration only in strict/future modes; do not claim guard-mode local file-read
+  interception.
 - [~] `P6-06` Detect common bypass conditions such as direct provider configuration,
   unsupported agent version, or unavailable hooks. Managed children now use an
   environment allowlist; credential brokering and version/hook checks remain.
@@ -1110,8 +1271,9 @@ protection boundary.
 
 **Exit criteria:**
 
-- [~] `blindfold run claude|codex|opencode` launches installed agents and routes
-  configured provider traffic; full clean-project provider demos remain.
+- [~] `blindfold run --guard claude|codex|opencode` launches installed agents and
+  routes configured provider traffic; full clean-project provider demos remain.
+- [ ] Guard mode blocks direct known-provider egress once P4B lands.
 - [x] Startup output accurately reports the active boundary.
 - [x] Managed agents do not inherit the vault master key or unrelated parent secrets.
 - [x] Global `--trace` is explicit per invocation and produces independently clearable,
@@ -1119,8 +1281,9 @@ protection boundary.
   `trace list|show|tail|export|clear`.
 - [x] Traced agent sessions report `degraded` with `direct_filesystem_unmediated` while
   direct project-file reads remain outside Blindfold mediation.
-- [ ] Filesystem mediation or sandboxing prevents direct reads of sensitive project
-  files without changing normal agent Git/worktree behavior.
+- [ ] Strict mode filesystem mediation or sandboxing prevents direct reads of sensitive
+  project files without changing normal agent Git/worktree behavior inside the managed
+  workspace.
 - [ ] The full demo passes without a raw fixture appearing in agent-visible output or
   fake provider requests.
 - [x] Strict mode refuses known unsafe/degraded configurations.
@@ -1244,7 +1407,7 @@ assumptions, threats, mitigations, residual risks, and out-of-scope threats.
 ### In-Scope Protections
 
 - Accidental secrets in managed LLM prompts and responses
-- Supported agent reads of `.env` and other protected files
+- Direct known-provider LLM calls in guard mode once the egress guard is active
 - Secrets and PII in managed shell output
 - Raw values entering Blindfold logs or audit events
 - Model or tool responses reflecting known secrets
@@ -1258,14 +1421,14 @@ assumptions, threats, mitigations, residual risks, and out-of-scope threats.
 - A malicious process running with the user's permissions
 - A child process intentionally exfiltrating a secret explicitly granted to it
 - Agent network or filesystem access that bypasses Blindfold
-- Provider traffic sent directly rather than through the configured proxy
+- Provider traffic sent directly rather than through the configured proxy before the
+  egress guard is active, or from clients that ignore proxy settings
 - Memory scraping, swap inspection, hardware attacks, and side-channel attacks
 - Guaranteed detection of every unknown or transformed secret
 
 ### Future Strict-Sandbox Work
 
 - Container or OS sandbox
-- Network egress allowlist and direct-provider blocking
 - Brokered project filesystem mounts
 - Sanitized process environment
 - Process-tree monitoring and child egress controls
@@ -1328,20 +1491,22 @@ Suggested README opening:
 ````markdown
 # Blindfold
 
-**Let AI agents use secrets without seeing secrets.**
+**Let AI agents use secrets without leaking secrets.**
 
 Blindfold is a local privacy and secrets boundary for AI coding agents.
 
 ```text
-Agent can use secrets.
-Agent cannot see secrets.
-Agent can call APIs.
-Agent cannot print, log, paste, or send raw keys through managed LLM traffic.
+Guard mode:
+  Agent can read the repo.
+  Managed LLM/provider traffic is redacted before leaving the machine.
+
+Strict mode:
+  Agent runs in a managed workspace where raw secrets are absent.
 ```
 
 ```sh
 blindfold init
-blindfold run claude
+blindfold run --guard opencode
 ```
 ````
 
@@ -1359,10 +1524,14 @@ boundary in the first screenful.
 - Secret scanning and redaction for files and stdin
 - SafeRefs, destination-aware policy, encrypted vault, and safe audit
 - OpenAI-compatible and Anthropic-compatible local proxy
+- OpenRouter support through OpenAI-compatible proxy configuration
 - Bounded request/response collection with JSON/SSE sanitization; true progressive
   streaming remains incomplete
+- Guard mode runner that configures supported coding agents to use Blindfold-managed
+  provider traffic
+- Egress guard direct-provider blocking if P4B lands before release
 - Secret execution runtime
-- Claude Code wrapper and one end-to-end demo
+- Claude Code, Codex, and OpenCode wrapper docs and one end-to-end demo
 - macOS and Linux development targets; release support is gated on installation and key
   management evidence
 
@@ -1370,6 +1539,7 @@ boundary in the first screenful.
 
 - Transparent OS-wide interception
 - Strict container/network sandbox
+- Agent local file-read mediation in guard mode
 - MCP proxy
 - Generated diff scanner, unless it completes without delaying the critical path
 - PII restoration SDK
@@ -1387,10 +1557,13 @@ boundary in the first screenful.
 - [x] Piped stdin can be redacted.
 - [ ] `blindfold proxy` sanitizes OpenAI-compatible and Anthropic-compatible requests
   and responses.
+- [ ] OpenRouter/OpenAI-compatible routed traffic is sanitized when configured.
 - [ ] Streaming sanitization catches a secret across every tested chunk boundary.
 - [ ] `blindfold exec --secret NAME -- COMMAND` injects only approved values.
 - [ ] Command stdout/stderr is sanitized while exit behavior is preserved.
-- [ ] `blindfold run claude` completes the documented end-to-end demo.
+- [ ] `blindfold run --guard opencode|claude|codex` completes the documented
+  end-to-end demo without raw secrets reaching the fake provider.
+- [ ] Guard mode blocks direct known-provider egress when the egress guard is enabled.
 - [x] Startup output distinguishes protected, degraded, and unprotected paths.
 - [x] Strict mode refuses to start when its required controls are unavailable.
 - [x] Vault list and audit output are useful without revealing raw values.
@@ -1542,12 +1715,13 @@ The first release demo is:
 
 ```sh
 blindfold init
-blindfold run claude
+blindfold run --guard opencode
 ```
 
-Within a sample project, Claude reads a protected `.env` representation containing
-SafeRefs, invokes tests through `blindfold exec` with a realistic fake credential, and
-receives sanitized command output. A fake upstream capture and the Blindfold logs prove
-that the raw value never crossed the managed boundary.
+Within a sample project, OpenCode may read local files normally, including fake secret
+fixtures. Its configured LLM traffic goes through Blindfold. A fake upstream capture
+proves that raw `.env` values, API keys, and private-key fixtures are redacted before
+the provider sees them. The demo also invokes tests through `blindfold exec` with a
+realistic fake credential and verifies sanitized command output.
 
 That vertical slice is the core product and the `v0.1.0` release target.
