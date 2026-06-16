@@ -976,16 +976,60 @@ fn append_command_trace(
     bytes: (u64, u64),
     replacements: Vec<TraceReplacement>,
 ) -> blindfold_trace::Result<()> {
-    let store = open_trace_store(root)?;
-    let record = TraceRecord::now(
-        next_trace_request_id(),
+    append_trace_record(
+        root,
         route,
         TraceCoverage::Protected,
         TraceOutcome::Observed,
         bytes,
-        (0, 0),
         replacements,
         None,
+    )
+}
+
+fn append_degraded_run_trace(root: &Path, route: TraceRoute) -> blindfold_trace::Result<()> {
+    append_trace_record(
+        root,
+        route,
+        TraceCoverage::Degraded,
+        TraceOutcome::Observed,
+        (0, 0),
+        Vec::new(),
+        Some(TraceIssue::DirectFilesystemUnmediated),
+    )
+}
+
+fn append_unprotected_run_trace(root: &Path, route: TraceRoute) -> blindfold_trace::Result<()> {
+    append_trace_record(
+        root,
+        route,
+        TraceCoverage::Unprotected,
+        TraceOutcome::Observed,
+        (0, 0),
+        Vec::new(),
+        Some(TraceIssue::DirectFilesystemUnmediated),
+    )
+}
+
+fn append_trace_record(
+    root: &Path,
+    route: TraceRoute,
+    coverage: TraceCoverage,
+    outcome: TraceOutcome,
+    bytes: (u64, u64),
+    replacements: Vec<TraceReplacement>,
+    issue: Option<TraceIssue>,
+) -> blindfold_trace::Result<()> {
+    let store = open_trace_store(root)?;
+    let record = TraceRecord::now(
+        next_trace_request_id(),
+        route,
+        coverage,
+        outcome,
+        bytes,
+        (0, 0),
+        replacements,
+        issue,
     )?;
     store.append(&record)
 }
@@ -1130,6 +1174,7 @@ const fn trace_issue_label(issue: TraceIssue) -> &'static str {
         TraceIssue::RouteNotAllowed => "route_not_allowed",
         TraceIssue::UpstreamFailure => "upstream_failure",
         TraceIssue::Timeout => "timeout",
+        TraceIssue::DirectFilesystemUnmediated => "direct_filesystem_unmediated",
     }
 }
 
@@ -1287,7 +1332,13 @@ async fn run_agent_command(root: &Path, args: &ArgMatches, trace_enabled: bool) 
 
     if bypass {
         eprintln!("Blindfold bypass requested; launching {agent} without the managed proxy.");
-        return run_native_agent(agent, agent_command, &agent_args).await;
+        let code = run_native_agent(agent, agent_command, &agent_args).await;
+        if trace_enabled
+            && let Err(error) = append_unprotected_run_trace(root, run_trace_route(agent))
+        {
+            return fail(&error.to_string());
+        }
+        return code;
     }
     if args.get_flag("strict") {
         return fail(
@@ -1299,12 +1350,20 @@ async fn run_agent_command(root: &Path, args: &ArgMatches, trace_enabled: bool) 
     eprintln!("- managed provider request/response proxy: available");
     eprintln!("- interactive terminal output sanitization: unavailable");
     eprintln!("- direct filesystem/network bypass prevention: unavailable");
+    eprintln!(
+        "- agent file reads: unmediated; if the agent opens .env directly, it can see raw contents"
+    );
     eprintln!("- parent secret environment isolation: available");
     eprintln!("- provider credential broker: unavailable; use the agent credential store");
     eprintln!(
         "- payload-free request tracing: {}",
         if trace_enabled { "enabled" } else { "disabled" }
     );
+    if trace_enabled {
+        eprintln!(
+            "- trace scope: command/session metadata and managed provider requests only; direct file reads are not observable"
+        );
+    }
     eprintln!("- one-run opt-out: --no-proxy or {BYPASS_ENV}=1");
 
     if agent == "codex" && codex_overrides_proxy(&agent_args) {
@@ -1368,9 +1427,7 @@ async fn run_agent_command(root: &Path, args: &ArgMatches, trace_enabled: bool) 
     if trace_sink.is_some_and(|sink| sink.failed()) {
         return fail("one or more request traces could not be persisted safely");
     }
-    if trace_enabled
-        && let Err(error) = append_command_trace(root, run_trace_route(agent), (0, 0), Vec::new())
-    {
+    if trace_enabled && let Err(error) = append_degraded_run_trace(root, run_trace_route(agent)) {
         return fail(&error.to_string());
     }
     match status {

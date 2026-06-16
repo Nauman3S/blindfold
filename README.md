@@ -291,6 +291,11 @@ sanitizes supported provider traffic, but not interactive terminal output, and i
 prevent direct filesystem or network bypasses. `--strict` refuses to start while those
 controls remain unavailable.
 
+Important: `blindfold run ... --trace` does not mediate agent file reads. If OpenCode,
+Codex, or Claude opens `.env` directly, it can read the raw file. Trace records mark the
+agent session as degraded with `direct_filesystem_unmediated`; only traffic that passes
+through Blindfold's proxy is sanitized.
+
 Automatic PII detection is not implemented. The TypeScript SDK restores only PII values
 that the application explicitly supplies to it; this is not repository or traffic PII
 discovery.

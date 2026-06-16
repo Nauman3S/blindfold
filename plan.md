@@ -1117,6 +1117,8 @@ protection boundary.
 - [x] Global `--trace` is explicit per invocation and produces independently clearable,
   schema-validated command/session/request metadata through
   `trace list|show|tail|export|clear`.
+- [x] Traced agent sessions report `degraded` with `direct_filesystem_unmediated` while
+  direct project-file reads remain outside Blindfold mediation.
 - [ ] The full demo passes without a raw fixture appearing in agent-visible output or
   fake provider requests.
 - [x] Strict mode refuses known unsafe/degraded configurations.

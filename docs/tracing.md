@@ -69,3 +69,7 @@ Command-level records describe Blindfold commands that ran with `--trace`, such 
 `redact`, `scan`, `doctor`, `exec`, or `run:codex`. Agent sessions also emit provider
 request records for traffic that reaches the managed local proxy. Direct filesystem or
 network bypasses remain outside this trace boundary.
+
+For `run:claude`, `run:codex`, and `run:opencode`, the session record is degraded while
+file mediation is absent. Trace can tell you that direct file reads were unmediated; it
+cannot see or redact what the agent read from disk.

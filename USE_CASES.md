@@ -90,6 +90,10 @@ Trace a Codex session and its managed provider requests:
 bf run codex --trace
 ```
 
+This does not redact direct file reads. If the agent opens `.env` from disk, it can see
+the raw file. The trace will mark the session as degraded with
+`direct_filesystem_unmediated`.
+
 After the agent makes provider requests:
 
 ```sh

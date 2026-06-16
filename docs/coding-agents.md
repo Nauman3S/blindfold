@@ -91,6 +91,12 @@ not currently sanitize interactive terminal output, broker provider credentials,
 prevent direct filesystem and network access. `--strict` therefore refuses to start
 instead of claiming those controls exist.
 
+Agent file reads are not mediated. If an agent opens `.env`, `.env.local`, or any other
+project file directly, it reads the file from disk exactly as stored. Use `blindfold
+redact FILE`, `blindfold exec`, or a future file broker/hook workflow for protected file
+content. `run --trace` records the session as degraded with
+`direct_filesystem_unmediated`; it does not redact direct file reads.
+
 OpenCode providers other than `openai` and `anthropic` are not routed through Blindfold.
 Managed OpenCode settings may also override runtime configuration; verify organizational
 policy before relying on the wrapper.

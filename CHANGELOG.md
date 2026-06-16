@@ -37,6 +37,8 @@ project follows Semantic Versioning as described in
 
 ### Fixed
 
+- Traced agent sessions now explicitly report unmediated direct filesystem access
+  instead of implying the whole session is protected.
 - Managed coding-agent wrappers no longer inherit the parent secret environment.
 - Audit reads reject symlinks, oversized files, malformed records, and free-form fields.
 - MCP stdio reads are bounded per message and plaintext credential-named tool arguments

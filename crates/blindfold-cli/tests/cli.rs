@@ -218,6 +218,34 @@ fn global_trace_flag_can_appear_before_or_after_subcommand() -> Result<(), Box<d
     Ok(())
 }
 
+#[test]
+fn traced_agent_session_reports_unmediated_file_reads() -> Result<(), Box<dyn Error>> {
+    let directory = TestDirectory::new()?;
+    let agent = fake_agent(directory.path())?;
+    let output = Command::new(env!("CARGO_BIN_EXE_blindfold"))
+        .args([
+            "run",
+            "opencode",
+            "--trace",
+            "--agent-command",
+            agent.to_str().ok_or("non-UTF-8 agent path")?,
+            "--",
+            "--version",
+        ])
+        .current_dir(directory.path())
+        .output()?;
+
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert!(stderr(&output).contains("agent file reads: unmediated"));
+    let trace = blindfold(directory.path(), &["trace", "tail"])?;
+    let output = stdout(&trace);
+    assert!(trace.status.success(), "{}", stderr(&trace));
+    assert!(output.contains("activity: run:opencode"));
+    assert!(output.contains("coverage: degraded"));
+    assert!(output.contains("issue: direct_filesystem_unmediated"));
+    Ok(())
+}
+
 #[cfg(unix)]
 #[test]
 fn trace_rejects_symlinked_storage_without_printing_target() -> Result<(), Box<dyn Error>> {

@@ -129,6 +129,8 @@ pub enum Issue {
     UpstreamFailure,
     /// The request timed out.
     Timeout,
+    /// The managed agent can still read project files without Blindfold mediation.
+    DirectFilesystemUnmediated,
 }
 
 /// Closed detector category retained for correlation.
