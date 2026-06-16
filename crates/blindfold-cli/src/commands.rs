@@ -303,7 +303,8 @@ fn cli() -> Command {
                         .default_value("127.0.0.1:8787"),
                 )
                 .arg(Arg::new("openai").long("openai-upstream"))
-                .arg(Arg::new("anthropic").long("anthropic-upstream")),
+                .arg(Arg::new("anthropic").long("anthropic-upstream"))
+                .arg(Arg::new("openrouter").long("openrouter-upstream")),
         )
         .subcommand(
             Command::new("mcp")
@@ -324,6 +325,12 @@ fn cli() -> Command {
                         .required(true)
                         .value_parser(["claude", "codex", "opencode"]),
                 )
+                .arg(
+                    Arg::new("guard")
+                        .long("guard")
+                        .help("Run in guard mode: route managed provider traffic through Blindfold")
+                        .action(ArgAction::SetTrue),
+                )
                 .arg(Arg::new("strict").long("strict").action(ArgAction::SetTrue))
                 .arg(
                     Arg::new("anthropic")
@@ -334,6 +341,11 @@ fn cli() -> Command {
                     Arg::new("openai")
                         .long("openai-upstream")
                         .default_value("https://api.openai.com/v1"),
+                )
+                .arg(
+                    Arg::new("openrouter")
+                        .long("openrouter-upstream")
+                        .default_value("https://openrouter.ai/api/v1"),
                 )
                 .arg(
                     Arg::new("no_proxy")
@@ -1202,6 +1214,12 @@ async fn proxy_command(args: &ArgMatches) -> ExitCode {
             Err(error) => return fail(&error.to_string()),
         }
     }
+    if let Some(url) = args.get_one::<String>("openrouter") {
+        match Upstream::new("openrouter", url, Provider::OpenAi) {
+            Ok(upstream) => upstreams.push(upstream),
+            Err(error) => return fail(&error.to_string()),
+        }
+    }
     if upstreams.is_empty() {
         return fail("at least one upstream must be configured");
     }
@@ -1224,7 +1242,7 @@ async fn proxy_command(args: &ArgMatches) -> ExitCode {
         Err(error) => return fail(&error.to_string()),
     };
     println!("Blindfold proxy listening on http://{}", bound.local_addr());
-    println!("Routes: /openai/... and /anthropic/...");
+    println!("Routes: /openai/..., /anthropic/..., and /openrouter/...");
     let cancellation = CancellationToken::new();
     let signal = cancellation.clone();
     tokio::spawn(async move {
@@ -1350,10 +1368,16 @@ async fn run_agent_command(root: &Path, args: &ArgMatches, trace_enabled: bool) 
         );
     }
 
-    eprintln!("Blindfold degraded mode:");
+    let mode = if args.get_flag("guard") {
+        "Blindfold Guard active:"
+    } else {
+        "Blindfold degraded compatibility mode:"
+    };
+    eprintln!("{mode}");
     eprintln!("- managed provider request/response proxy: available");
     eprintln!("- interactive terminal output sanitization: unavailable");
     eprintln!("- direct filesystem/network bypass prevention: unavailable");
+    eprintln!("- direct known-provider egress blocking: unavailable until egress guard lands");
     eprintln!(
         "- agent file reads: unmediated; if the agent opens .env directly, it can see raw contents"
     );
@@ -1486,6 +1510,9 @@ fn agent_upstreams(agent: &str, args: &ArgMatches) -> Result<Vec<Upstream>, Exit
     let openai = args
         .get_one::<String>("openai")
         .map_or("https://api.openai.com/v1", String::as_str);
+    let openrouter = args
+        .get_one::<String>("openrouter")
+        .map_or("https://openrouter.ai/api/v1", String::as_str);
     let upstream = |name, url, provider| {
         Upstream::new(name, url, provider).map_err(|error| fail(&error.to_string()))
     };
@@ -1495,6 +1522,7 @@ fn agent_upstreams(agent: &str, args: &ArgMatches) -> Result<Vec<Upstream>, Exit
         "opencode" => Ok(vec![
             upstream("anthropic", anthropic, Provider::Anthropic)?,
             upstream("openai", openai, Provider::OpenAi)?,
+            upstream("openrouter", openrouter, Provider::OpenAi)?,
         ]),
         _ => Err(fail("unsupported coding agent")),
     }
@@ -1545,6 +1573,11 @@ fn opencode_proxy_config(proxy_origin: &str) -> String {
                 "openai": {
                     "options": {
                         "baseURL": format!("{proxy_origin}/openai/v1")
+                    }
+                },
+                "openrouter": {
+                    "options": {
+                        "baseURL": format!("{proxy_origin}/openrouter/v1")
                     }
                 }
             }
@@ -1602,13 +1635,13 @@ fn shell_init_command(args: &ArgMatches) -> ExitCode {
     }
     print!(
         r#"claude() {{
-  if [[ "${{BLINDFOLD_BYPASS:-0}}" == "1" ]]; then command claude "$@"; else command blindfold run claude -- "$@"; fi
+  if [[ "${{BLINDFOLD_BYPASS:-0}}" == "1" ]]; then command claude "$@"; else command blindfold run --guard claude -- "$@"; fi
 }}
 codex() {{
-  if [[ "${{BLINDFOLD_BYPASS:-0}}" == "1" ]]; then command codex "$@"; else command blindfold run codex -- "$@"; fi
+  if [[ "${{BLINDFOLD_BYPASS:-0}}" == "1" ]]; then command codex "$@"; else command blindfold run --guard codex -- "$@"; fi
 }}
 opencode() {{
-  if [[ "${{BLINDFOLD_BYPASS:-0}}" == "1" ]]; then command opencode "$@"; else command blindfold run opencode -- "$@"; fi
+  if [[ "${{BLINDFOLD_BYPASS:-0}}" == "1" ]]; then command opencode "$@"; else command blindfold run --guard opencode -- "$@"; fi
 }}
 bf-off() {{
   BLINDFOLD_BYPASS=1 "$@"

@@ -51,7 +51,7 @@ blindfold --help
 ```sh
 blindfold init
 blindfold doctor
-blindfold run codex
+blindfold run --guard codex
 ```
 
 Common tasks and copy-paste examples are in [USE_CASES.md](USE_CASES.md).
@@ -250,9 +250,9 @@ Launch an installed coding agent through an ephemeral loopback proxy. Native arg
 go after `--`:
 
 ```sh
-blindfold run claude -- --model sonnet
-blindfold run codex -- review
-blindfold run opencode -- run "inspect this project"
+blindfold run --guard claude -- --model sonnet
+blindfold run --guard codex -- review
+blindfold run --guard opencode -- run "inspect this project"
 ```
 
 No persistent Claude, Codex, or OpenCode configuration is changed. Managed wrappers
@@ -311,7 +311,7 @@ managed agent session:
 
 ```sh
 bf redact .env --trace
-bf run claude --trace
+bf run --guard claude --trace
 ```
 
 Inspect the retained traces:

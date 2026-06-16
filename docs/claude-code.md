@@ -6,10 +6,10 @@ details.
 
 ## Status
 
-`blindfold run claude` starts a local Anthropic-compatible application proxy and points
-the Claude process at it with an ephemeral `ANTHROPIC_BASE_URL`. No persistent Claude
-configuration is changed. Strict mode refuses to start because the full boundary cannot
-yet be established.
+`blindfold run --guard claude` starts a local Anthropic-compatible application proxy
+and points the Claude process at it with an ephemeral `ANTHROPIC_BASE_URL`. No
+persistent Claude configuration is changed. Strict mode refuses to start because the
+full boundary cannot yet be established.
 
 ## Intended Protected Paths
 
@@ -44,13 +44,13 @@ MVP boundary. It does not create an OS sandbox or network firewall.
 ```sh
 blindfold init
 blindfold doctor
-blindfold run claude
+blindfold run --guard claude
 ```
 
 Pass native Claude arguments after `--`, for example:
 
 ```sh
-blindfold run claude -- --model sonnet
+blindfold run --guard claude -- --model sonnet
 ```
 
 Use `blindfold run claude --no-proxy -- ...` for a visible one-run bypass.

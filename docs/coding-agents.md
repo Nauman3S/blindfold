@@ -6,9 +6,9 @@ application proxy. It does not modify the agents' persistent configuration.
 ## Direct Usage
 
 ```sh
-blindfold run claude -- --version
-blindfold run codex -- review
-blindfold run opencode -- run "inspect this project"
+blindfold run --guard claude -- --version
+blindfold run --guard codex -- review
+blindfold run --guard opencode -- run "inspect this project"
 ```
 
 Arguments after `--` are passed to the native agent unchanged.
@@ -17,17 +17,22 @@ The default upstreams are:
 
 - Claude and OpenCode Anthropic: `https://api.anthropic.com`
 - Codex and OpenCode OpenAI: `https://api.openai.com/v1`
+- OpenCode OpenRouter: `https://openrouter.ai/api/v1`
 
 Override them only when using a compatible gateway:
 
 ```sh
-blindfold run claude \
+blindfold run --guard claude \
   --anthropic-upstream https://gateway.example/anthropic \
   -- --model sonnet
 
-blindfold run codex \
+blindfold run --guard codex \
   --openai-upstream https://gateway.example/openai/v1 \
   -- review
+
+blindfold run --guard opencode \
+  --openrouter-upstream https://openrouter.ai/api/v1 \
+  -- run "inspect this project"
 ```
 
 ## Keep Native Command Names
@@ -75,8 +80,8 @@ It does not change persistent configuration.
 - Claude receives an ephemeral `ANTHROPIC_BASE_URL`.
 - Codex receives an ephemeral `openai_base_url` CLI configuration override.
 - OpenCode receives an `OPENCODE_CONFIG_CONTENT` overlay for its OpenAI and Anthropic
-  provider base URLs (`/openai/v1` and `/anthropic/v1`). Existing inline settings are
-  retained.
+  provider base URLs (`/openai/v1`, `/anthropic/v1`, and `/openrouter/v1`). Existing
+  inline settings are retained.
 
 The proxy exists only for the child process lifetime and binds to an ephemeral loopback
 port. The child receives an allowlisted environment and does not inherit parent API-key

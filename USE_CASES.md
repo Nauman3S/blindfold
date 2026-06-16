@@ -6,9 +6,9 @@ This is the short guide. You do not need to learn every Blindfold command.
 
 | I want to... | Command |
 | --- | --- |
-| Start Codex with Blindfold | `blindfold run codex` |
-| Start Claude with Blindfold | `blindfold run claude` |
-| Start OpenCode with Blindfold | `blindfold run opencode` |
+| Start Codex with Blindfold Guard | `blindfold run --guard codex` |
+| Start Claude with Blindfold Guard | `blindfold run --guard claude` |
+| Start OpenCode with Blindfold Guard | `blindfold run --guard opencode` |
 | Trace a command or agent session | `bf redact .env --trace` |
 | Inspect the latest trace | `bf trace tail` |
 | Temporarily run an agent without Blindfold | `blindfold run codex --no-proxy` |
@@ -44,15 +44,15 @@ validates it, but most runtime commands currently use CLI defaults and flags. Do
 Start an interactive Codex session:
 
 ```sh
-blindfold run codex
+blindfold run --guard codex
 ```
 
 Pass normal Codex arguments after `--`:
 
 ```sh
-blindfold run codex -- review
-blindfold run codex -- "explain this repository"
-blindfold run codex -- --sandbox workspace-write
+blindfold run --guard codex -- review
+blindfold run --guard codex -- "explain this repository"
+blindfold run --guard codex -- --sandbox workspace-write
 ```
 
 Blindfold starts a temporary local proxy, launches Codex, and stops the proxy when
@@ -65,15 +65,15 @@ you intentionally need the native environment for one run.
 ## Use Case 2: Run Claude or OpenCode
 
 ```sh
-blindfold run claude
-blindfold run opencode
+blindfold run --guard claude
+blindfold run --guard opencode
 ```
 
 Examples with native arguments:
 
 ```sh
-blindfold run claude -- --model sonnet
-blindfold run opencode -- run "find the failing test"
+blindfold run --guard claude -- --model sonnet
+blindfold run --guard opencode -- run "find the failing test"
 ```
 
 ## Use Case 3: Trace What Blindfold Protected
@@ -87,7 +87,7 @@ bf redact .env --trace
 Trace a Codex session and its managed provider requests:
 
 ```sh
-bf run codex --trace
+bf run --guard codex --trace
 ```
 
 Traced agent runs do not redact direct file reads. If the agent opens `.env` from the
@@ -327,7 +327,7 @@ For most development sessions, this is enough:
 
 ```sh
 # Start your agent
-blindfold run codex
+blindfold run --guard codex
 
 # Before committing
 blindfold diff-check

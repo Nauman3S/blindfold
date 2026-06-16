@@ -1249,11 +1249,12 @@ protection boundary.
 - [~] `P6-01` Spike Claude Code's supported proxy/base-URL, hook, MCP, and environment
   integration points; record exact protected and unprotected paths.
 - [x] `P6-02` Implement `blindfold run --guard claude|codex|opencode` with native
-  trailing arguments and per-run opt-out. Preserve current shorthand only as a
-  compatibility path if needed.
+  trailing arguments and per-run opt-out. Current shorthand remains as a compatibility
+  path.
 - [x] `P6-03` Start and health-check the local proxy, configure the child agent, and
   clean up on exit.
-- [ ] `P6-03B` Configure OpenRouter/OpenAI-compatible routing when selected by config.
+- [x] `P6-03B` Configure OpenRouter/OpenAI-compatible routing for OpenCode through
+  Blindfold's local proxy.
 - [ ] `P6-03C` Start and configure the egress guard once P4B exists.
 - [!] `P6-04` Sanitize wrapper-managed stdout/stderr.
 - [!] `P6-05` Protect supported file/tool reads through documented hooks or broker
@@ -1557,7 +1558,8 @@ boundary in the first screenful.
 - [x] Piped stdin can be redacted.
 - [ ] `blindfold proxy` sanitizes OpenAI-compatible and Anthropic-compatible requests
   and responses.
-- [ ] OpenRouter/OpenAI-compatible routed traffic is sanitized when configured.
+- [x] OpenRouter/OpenAI-compatible routed traffic is sanitized when configured for
+  OpenCode.
 - [ ] Streaming sanitization catches a secret across every tested chunk boundary.
 - [ ] `blindfold exec --secret NAME -- COMMAND` injects only approved values.
 - [ ] Command stdout/stderr is sanitized while exit behavior is preserved.

@@ -649,6 +649,7 @@ fn claude_wrapper_routes_through_anthropic_proxy() -> Result<(), Box<dyn Error>>
         directory.path(),
         &[
             "run",
+            "--guard",
             "claude",
             "--agent-command",
             agent.to_str().ok_or("non-UTF-8 agent path")?,
@@ -658,6 +659,7 @@ fn claude_wrapper_routes_through_anthropic_proxy() -> Result<(), Box<dyn Error>>
     )?;
 
     assert!(output.status.success(), "{}", stderr(&output));
+    assert!(stderr(&output).contains("Blindfold Guard active"));
     assert_eq!(
         fs::read_to_string(directory.path().join("agent-args"))?,
         "--version\n"
@@ -676,6 +678,7 @@ fn codex_wrapper_injects_one_run_base_url_override() -> Result<(), Box<dyn Error
         directory.path(),
         &[
             "run",
+            "--guard",
             "codex",
             "--agent-command",
             agent.to_str().ok_or("non-UTF-8 agent path")?,
@@ -698,6 +701,7 @@ fn opencode_wrapper_merges_inline_config_and_routes_both_providers() -> Result<(
     let output = Command::new(env!("CARGO_BIN_EXE_blindfold"))
         .args([
             "run",
+            "--guard",
             "opencode",
             "--agent-command",
             agent.to_str().ok_or("non-UTF-8 agent path")?,
@@ -727,6 +731,11 @@ fn opencode_wrapper_merges_inline_config_and_routes_both_providers() -> Result<(
         config["provider"]["anthropic"]["options"]["baseURL"]
             .as_str()
             .is_some_and(|url| url.ends_with("/anthropic/v1"))
+    );
+    assert!(
+        config["provider"]["openrouter"]["options"]["baseURL"]
+            .as_str()
+            .is_some_and(|url| url.ends_with("/openrouter/v1"))
     );
     Ok(())
 }
@@ -794,9 +803,9 @@ fn shell_init_wraps_all_agents_and_exposes_bypass_helper() -> Result<(), Box<dyn
     let script = stdout(&output);
 
     assert!(output.status.success());
-    assert!(script.contains("blindfold run claude"));
-    assert!(script.contains("blindfold run codex"));
-    assert!(script.contains("blindfold run opencode"));
+    assert!(script.contains("blindfold run --guard claude"));
+    assert!(script.contains("blindfold run --guard codex"));
+    assert!(script.contains("blindfold run --guard opencode"));
     assert!(script.contains("bf-off()"));
     Ok(())
 }
