@@ -409,21 +409,25 @@ impl std::error::Error for ScanError {}
 #[cfg(test)]
 mod tests {
     use std::fs;
+    use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use crate::{BinaryHandling, DetectorSet, ScanLimits, SecretKind};
 
     use super::ScannerBuilder;
 
+    static NEXT_TEMP: AtomicU64 = AtomicU64::new(0);
+
     fn temporary_directory() -> std::path::PathBuf {
         let nonce = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map_or(0, |duration| duration.as_nanos());
+        let sequence = NEXT_TEMP.fetch_add(1, Ordering::Relaxed);
         let path = std::env::temp_dir().join(format!(
-            "blindfold-detectors-{}-{nonce}",
+            "blindfold-detectors-{}-{nonce}-{sequence}",
             std::process::id()
         ));
-        fs::create_dir_all(&path)
+        fs::create_dir(&path)
             .unwrap_or_else(|error| unreachable!("temporary directory must be created: {error}"));
         path
     }

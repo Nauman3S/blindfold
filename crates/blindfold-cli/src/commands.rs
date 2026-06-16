@@ -46,6 +46,7 @@ use crate::{config, doctor};
 
 const MASTER_KEY_ENV: &str = "BLINDFOLD_MASTER_KEY";
 const BYPASS_ENV: &str = "BLINDFOLD_BYPASS";
+const REDACTED_WORKTREE_MAX_FILE_BYTES: u64 = 1024 * 1024;
 static NEXT_CLI_TRACE_ID: AtomicU64 = AtomicU64::new(1);
 
 pub(crate) async fn run() -> ExitCode {
@@ -339,6 +340,12 @@ fn cli() -> Command {
                     Arg::new("no_proxy")
                         .long("no-proxy")
                         .help("Run the native agent directly for this invocation")
+                        .action(ArgAction::SetTrue),
+                )
+                .arg(
+                    Arg::new("redacted_worktree")
+                        .long("redacted-worktree")
+                        .help("Run the agent from a temporary redacted copy of this project")
                         .action(ArgAction::SetTrue),
                 )
                 .arg(
@@ -657,6 +664,203 @@ fn valid_trace_env_name(name: &str) -> bool {
     };
     (first.is_ascii_alphabetic() || first == b'_')
         && bytes.all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+}
+
+struct RedactedWorktree {
+    path: PathBuf,
+    files_written: usize,
+    files_redacted: usize,
+    files_skipped: usize,
+}
+
+impl RedactedWorktree {
+    fn create(source: &Path) -> Result<Self, String> {
+        let path = create_private_temp_directory()?;
+        let redactor = Redactor::new(DetectorSet::new().map_err(|error| error.to_string())?);
+        let mut worktree = Self {
+            path,
+            files_written: 0,
+            files_redacted: 0,
+            files_skipped: 0,
+        };
+        worktree.copy_directory(source, source, &redactor)?;
+        Ok(worktree)
+    }
+
+    fn path(&self) -> &Path {
+        &self.path
+    }
+
+    fn files_written(&self) -> usize {
+        self.files_written
+    }
+
+    fn files_redacted(&self) -> usize {
+        self.files_redacted
+    }
+
+    fn files_skipped(&self) -> usize {
+        self.files_skipped
+    }
+
+    fn copy_directory(
+        &mut self,
+        source_root: &Path,
+        directory: &Path,
+        redactor: &Redactor,
+    ) -> Result<(), String> {
+        let entries = fs::read_dir(directory).map_err(|error| {
+            format!(
+                "could not read project directory for redacted worktree: {}",
+                error.kind()
+            )
+        })?;
+        for entry in entries {
+            let entry = entry.map_err(|error| {
+                format!(
+                    "could not read project entry for redacted worktree: {}",
+                    error.kind()
+                )
+            })?;
+            let source = entry.path();
+            if should_skip_redacted_worktree_entry(&source) {
+                self.files_skipped += 1;
+                continue;
+            }
+            let file_type = entry.file_type().map_err(|error| {
+                format!(
+                    "could not inspect project entry for redacted worktree: {}",
+                    error.kind()
+                )
+            })?;
+            let relative = source.strip_prefix(source_root).map_err(|_| {
+                "could not derive relative project path for redacted worktree".to_owned()
+            })?;
+            let destination = self.path.join(relative);
+            if file_type.is_symlink() {
+                self.files_skipped += 1;
+            } else if file_type.is_dir() {
+                fs::create_dir_all(&destination).map_err(|error| {
+                    format!(
+                        "could not create redacted worktree directory: {}",
+                        error.kind()
+                    )
+                })?;
+                self.copy_directory(source_root, &source, redactor)?;
+            } else if file_type.is_file() {
+                self.copy_file(&source, &destination, redactor)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn copy_file(
+        &mut self,
+        source: &Path,
+        destination: &Path,
+        redactor: &Redactor,
+    ) -> Result<(), String> {
+        let metadata = fs::metadata(source).map_err(|error| {
+            format!(
+                "could not inspect project file for redacted worktree: {}",
+                error.kind()
+            )
+        })?;
+        if metadata.len() > REDACTED_WORKTREE_MAX_FILE_BYTES {
+            self.files_skipped += 1;
+            return Ok(());
+        }
+        let bytes = fs::read(source).map_err(|error| {
+            format!(
+                "could not read project file for redacted worktree: {}",
+                error.kind()
+            )
+        })?;
+        let Ok(input) = String::from_utf8(bytes) else {
+            self.files_skipped += 1;
+            return Ok(());
+        };
+        let output = redactor
+            .redact(&input, RedactionOptions::new(RedactionMode::Placeholder))
+            .map_err(|error| error.to_string())?;
+        if let Some(parent) = destination.parent() {
+            fs::create_dir_all(parent).map_err(|error| {
+                format!(
+                    "could not create redacted worktree directory: {}",
+                    error.kind()
+                )
+            })?;
+        }
+        fs::write(destination, output.text())
+            .map_err(|error| format!("could not write redacted worktree file: {}", error.kind()))?;
+        self.files_written += 1;
+        if !output.findings().is_empty() {
+            self.files_redacted += 1;
+        }
+        Ok(())
+    }
+}
+
+impl Drop for RedactedWorktree {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.path);
+    }
+}
+
+fn should_skip_redacted_worktree_entry(path: &Path) -> bool {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| {
+            matches!(
+                name,
+                ".git" | ".blindfold" | "target" | "node_modules" | ".DS_Store"
+            )
+        })
+}
+
+fn create_private_temp_directory() -> Result<PathBuf, String> {
+    let base = env::temp_dir();
+    for attempt in 0..100_u32 {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_err(|_| "system clock is before Unix epoch".to_owned())?
+            .as_nanos();
+        let path = base.join(format!(
+            "blindfold-redacted-worktree-{}-{nanos}-{attempt}",
+            std::process::id()
+        ));
+        match fs::create_dir(&path) {
+            Ok(()) => {
+                restrict_directory(&path)?;
+                return Ok(path);
+            }
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
+            Err(error) => {
+                return Err(format!(
+                    "could not create redacted worktree directory: {}",
+                    error.kind()
+                ));
+            }
+        }
+    }
+    Err("could not allocate a unique redacted worktree directory".to_owned())
+}
+
+#[cfg(unix)]
+fn restrict_directory(path: &Path) -> Result<(), String> {
+    use std::os::unix::fs::PermissionsExt;
+
+    fs::set_permissions(path, fs::Permissions::from_mode(0o700)).map_err(|error| {
+        format!(
+            "could not restrict redacted worktree directory: {}",
+            error.kind()
+        )
+    })
+}
+
+#[cfg(not(unix))]
+fn restrict_directory(_path: &Path) -> Result<(), String> {
+    Ok(())
 }
 
 fn write_redacted_output(path: &Path, contents: &str, force: bool) -> ExitCode {
@@ -987,7 +1191,11 @@ fn append_command_trace(
     )
 }
 
-fn append_degraded_run_trace(root: &Path, route: TraceRoute) -> blindfold_trace::Result<()> {
+fn append_degraded_run_trace(
+    root: &Path,
+    route: TraceRoute,
+    issue: TraceIssue,
+) -> blindfold_trace::Result<()> {
     append_trace_record(
         root,
         route,
@@ -995,7 +1203,7 @@ fn append_degraded_run_trace(root: &Path, route: TraceRoute) -> blindfold_trace:
         TraceOutcome::Observed,
         (0, 0),
         Vec::new(),
-        Some(TraceIssue::DirectFilesystemUnmediated),
+        Some(issue),
     )
 }
 
@@ -1175,6 +1383,7 @@ const fn trace_issue_label(issue: TraceIssue) -> &'static str {
         TraceIssue::UpstreamFailure => "upstream_failure",
         TraceIssue::Timeout => "timeout",
         TraceIssue::DirectFilesystemUnmediated => "direct_filesystem_unmediated",
+        TraceIssue::AgentBoundaryDegraded => "agent_boundary_degraded",
     }
 }
 
@@ -1329,10 +1538,27 @@ async fn run_agent_command(root: &Path, args: &ArgMatches, trace_enabled: bool) 
         .map(|values| values.cloned().collect::<Vec<_>>())
         .unwrap_or_default();
     let bypass = args.get_flag("no_proxy") || env_flag(BYPASS_ENV);
+    let redacted_worktree = if args.get_flag("redacted_worktree") {
+        match RedactedWorktree::create(root) {
+            Ok(worktree) => Some(worktree),
+            Err(error) => return fail(&error),
+        }
+    } else {
+        None
+    };
 
     if bypass {
         eprintln!("Blindfold bypass requested; launching {agent} without the managed proxy.");
-        let code = run_native_agent(agent, agent_command, &agent_args).await;
+        if let Some(worktree) = &redacted_worktree {
+            print_redacted_worktree_summary(worktree);
+        }
+        let code = run_native_agent(
+            agent,
+            agent_command,
+            &agent_args,
+            redacted_worktree.as_ref().map(RedactedWorktree::path),
+        )
+        .await;
         if trace_enabled
             && let Err(error) = append_unprotected_run_trace(root, run_trace_route(agent))
         {
@@ -1350,9 +1576,19 @@ async fn run_agent_command(root: &Path, args: &ArgMatches, trace_enabled: bool) 
     eprintln!("- managed provider request/response proxy: available");
     eprintln!("- interactive terminal output sanitization: unavailable");
     eprintln!("- direct filesystem/network bypass prevention: unavailable");
-    eprintln!(
-        "- agent file reads: unmediated; if the agent opens .env directly, it can see raw contents"
-    );
+    if let Some(worktree) = &redacted_worktree {
+        print_redacted_worktree_summary(worktree);
+        eprintln!(
+            "- agent file reads: relative paths use the redacted worktree; absolute paths to the original project are still outside Blindfold"
+        );
+    } else {
+        eprintln!(
+            "- agent file reads: unmediated; if the agent opens .env directly, it can see raw contents"
+        );
+        eprintln!(
+            "- safer file-read mode: pass --redacted-worktree and ask the agent to use relative paths"
+        );
+    }
     eprintln!("- parent secret environment isolation: available");
     eprintln!("- provider credential broker: unavailable; use the agent credential store");
     eprintln!(
@@ -1421,13 +1657,25 @@ async fn run_agent_command(root: &Path, args: &ArgMatches, trace_enabled: bool) 
     let mut command = tokio::process::Command::new(agent_command);
     configure_managed_agent_environment(&mut command);
     configure_agent_command(agent, &mut command, &agent_args, &proxy_origin);
+    if let Some(worktree) = &redacted_worktree {
+        command.current_dir(worktree.path());
+        command.env("BLINDFOLD_REDACTED_WORKTREE", "1");
+        command.env("BLINDFOLD_ORIGINAL_WORKDIR", root);
+    }
     let status = command.status().await;
     cancellation.cancel();
     let _ = proxy_task.await;
     if trace_sink.is_some_and(|sink| sink.failed()) {
         return fail("one or more request traces could not be persisted safely");
     }
-    if trace_enabled && let Err(error) = append_degraded_run_trace(root, run_trace_route(agent)) {
+    let run_issue = if redacted_worktree.is_some() {
+        TraceIssue::AgentBoundaryDegraded
+    } else {
+        TraceIssue::DirectFilesystemUnmediated
+    };
+    if trace_enabled
+        && let Err(error) = append_degraded_run_trace(root, run_trace_route(agent), run_issue)
+    {
         return fail(&error.to_string());
     }
     match status {
@@ -1563,15 +1811,34 @@ fn codex_overrides_proxy(args: &[String]) -> bool {
         .any(|arg| arg.starts_with("--config=openai_base_url"))
 }
 
-async fn run_native_agent(agent: &str, command: &str, args: &[String]) -> ExitCode {
-    match tokio::process::Command::new(command)
-        .args(args)
-        .status()
-        .await
-    {
+async fn run_native_agent(
+    agent: &str,
+    command: &str,
+    args: &[String],
+    current_dir: Option<&Path>,
+) -> ExitCode {
+    let mut command = tokio::process::Command::new(command);
+    command.args(args);
+    if let Some(current_dir) = current_dir {
+        command.current_dir(current_dir);
+    }
+    match command.status().await {
         Ok(status) => exit_from_code(status.code()),
         Err(error) => fail(&format!("could not run {agent}: {}", error.kind())),
     }
+}
+
+fn print_redacted_worktree_summary(worktree: &RedactedWorktree) {
+    eprintln!(
+        "- redacted worktree: {} files copied, {} files redacted, {} entries skipped",
+        worktree.files_written(),
+        worktree.files_redacted(),
+        worktree.files_skipped()
+    );
+    eprintln!(
+        "- redacted worktree path: {}",
+        worktree.path().to_string_lossy()
+    );
 }
 
 fn env_flag(name: &str) -> bool {

@@ -71,5 +71,7 @@ request records for traffic that reaches the managed local proxy. Direct filesys
 network bypasses remain outside this trace boundary.
 
 For `run:claude`, `run:codex`, and `run:opencode`, the session record is degraded while
-file mediation is absent. Trace can tell you that direct file reads were unmediated; it
-cannot see or redact what the agent read from disk.
+full sandboxing is absent. Plain runs use `direct_filesystem_unmediated` because direct
+relative reads happen in the real project. Runs started with `--redacted-worktree` use
+`agent_boundary_degraded`: relative file reads see the redacted copy, but absolute paths
+to the original project and unmanaged network bypasses remain outside Blindfold.

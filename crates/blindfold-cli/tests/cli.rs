@@ -81,6 +81,23 @@ fn fake_agent(directory: &Path) -> Result<PathBuf, std::io::Error> {
     Ok(path)
 }
 
+fn fake_env_reader(directory: &Path) -> Result<PathBuf, std::io::Error> {
+    let path = directory.join("fake-env-reader");
+    let output = directory.join("agent-env-read");
+    fs::write(
+        &path,
+        format!(
+            "#!/bin/sh\ncat .env > '{}'\nprintf '%s' \"$PWD\" > '{}'\n",
+            output.display(),
+            directory.join("agent-pwd").display()
+        ),
+    )?;
+    let mut permissions = fs::metadata(&path)?.permissions();
+    permissions.set_mode(0o700);
+    fs::set_permissions(&path, permissions)?;
+    Ok(path)
+}
+
 #[test]
 fn help_and_version_are_available() -> Result<(), Box<dyn Error>> {
     let directory = TestDirectory::new()?;
@@ -243,6 +260,42 @@ fn traced_agent_session_reports_unmediated_file_reads() -> Result<(), Box<dyn Er
     assert!(output.contains("activity: run:opencode"));
     assert!(output.contains("coverage: degraded"));
     assert!(output.contains("issue: direct_filesystem_unmediated"));
+    Ok(())
+}
+
+#[test]
+fn redacted_worktree_hides_relative_file_reads_from_agent() -> Result<(), Box<dyn Error>> {
+    let directory = TestDirectory::new()?;
+    let raw = "sk-live-redacted-worktree-test-1234567890";
+    fs::write(directory.path().join(".env"), format!("API_KEY={raw}\n"))?;
+    let agent = fake_env_reader(directory.path())?;
+    let output = Command::new(env!("CARGO_BIN_EXE_blindfold"))
+        .args([
+            "run",
+            "opencode",
+            "--trace",
+            "--redacted-worktree",
+            "--agent-command",
+            agent.to_str().ok_or("non-UTF-8 agent path")?,
+        ])
+        .current_dir(directory.path())
+        .output()?;
+
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert!(stderr(&output).contains("redacted worktree:"));
+    assert!(stderr(&output).contains("relative paths use the redacted worktree"));
+    let seen = fs::read_to_string(directory.path().join("agent-env-read"))?;
+    assert!(!seen.contains(raw));
+    assert!(seen.contains("[REDACTED:"));
+    let agent_pwd = fs::read_to_string(directory.path().join("agent-pwd"))?;
+    assert_ne!(agent_pwd, directory.path().to_string_lossy());
+
+    let trace = blindfold(directory.path(), &["trace", "tail"])?;
+    let rendered = stdout(&trace);
+    assert!(trace.status.success(), "{}", stderr(&trace));
+    assert!(rendered.contains("coverage: degraded"));
+    assert!(rendered.contains("issue: agent_boundary_degraded"));
+    assert!(!rendered.contains("direct_filesystem_unmediated"));
     Ok(())
 }
 

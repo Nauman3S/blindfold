@@ -131,6 +131,8 @@ pub enum Issue {
     Timeout,
     /// The managed agent can still read project files without Blindfold mediation.
     DirectFilesystemUnmediated,
+    /// Some agent actions remain outside the managed Blindfold boundary.
+    AgentBoundaryDegraded,
 }
 
 /// Closed detector category retained for correlation.
