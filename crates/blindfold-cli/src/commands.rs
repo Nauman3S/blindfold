@@ -40,6 +40,8 @@ use blindfold_vault::{
     AuditAction, AuditEvent, AuditLog, AuditOutcome, MasterKey, RotationPolicy, Scope, Vault,
 };
 use clap::{Arg, ArgAction, ArgMatches, Command};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::{TcpListener, TcpStream};
 use tokio_util::sync::CancellationToken;
 
 use crate::{config, doctor};
@@ -1338,6 +1340,142 @@ fn read_bounded_line<R: BufRead>(
     }
 }
 
+struct BoundEgressGuard {
+    listener: TcpListener,
+    local_addr: SocketAddr,
+}
+
+impl BoundEgressGuard {
+    async fn bind() -> io::Result<Self> {
+        let listener = TcpListener::bind("127.0.0.1:0").await?;
+        let local_addr = listener.local_addr()?;
+        Ok(Self {
+            listener,
+            local_addr,
+        })
+    }
+
+    const fn local_addr(&self) -> SocketAddr {
+        self.local_addr
+    }
+
+    async fn serve(self, cancellation: CancellationToken) -> io::Result<()> {
+        loop {
+            tokio::select! {
+                () = cancellation.cancelled() => return Ok(()),
+                accepted = self.listener.accept() => {
+                    let (stream, _) = accepted?;
+                    tokio::spawn(async move {
+                        let _ = handle_egress_connection(stream).await;
+                    });
+                }
+            }
+        }
+    }
+}
+
+async fn handle_egress_connection(mut client: TcpStream) -> io::Result<()> {
+    let header = read_http_header(&mut client).await?;
+    let Ok(header_text) = std::str::from_utf8(&header) else {
+        client
+            .write_all(b"HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\n\r\n")
+            .await?;
+        return Ok(());
+    };
+    let Some(first_line) = header_text.lines().next() else {
+        client
+            .write_all(b"HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\n\r\n")
+            .await?;
+        return Ok(());
+    };
+    let parts = first_line.split_whitespace().collect::<Vec<_>>();
+    if parts.len() < 3 {
+        client
+            .write_all(b"HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\n\r\n")
+            .await?;
+        return Ok(());
+    }
+    if parts[0].eq_ignore_ascii_case("CONNECT") {
+        return handle_connect(&mut client, parts[1]).await;
+    }
+    client
+        .write_all(
+            b"HTTP/1.1 501 Not Implemented\r\nContent-Length: 55\r\n\r\nBlindfold egress guard currently supports CONNECT only.\n",
+        )
+        .await?;
+    Ok(())
+}
+
+async fn handle_connect(client: &mut TcpStream, authority: &str) -> io::Result<()> {
+    let host = authority_host(authority);
+    if is_blocked_llm_provider(host) {
+        client
+            .write_all(
+                b"HTTP/1.1 403 Forbidden\r\nContent-Length: 86\r\n\r\nBlocked direct LLM provider access; route provider traffic through Blindfold's LLM proxy.\n",
+            )
+            .await?;
+        return Ok(());
+    }
+    let Ok(mut upstream) = TcpStream::connect(authority).await else {
+        client
+            .write_all(b"HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\n\r\n")
+            .await?;
+        return Ok(());
+    };
+    client
+        .write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n")
+        .await?;
+    let _ = tokio::io::copy_bidirectional(client, &mut upstream).await;
+    Ok(())
+}
+
+async fn read_http_header(stream: &mut TcpStream) -> io::Result<Vec<u8>> {
+    const MAX_HEADER_BYTES: usize = 8192;
+    let mut header = Vec::new();
+    let mut buffer = [0_u8; 512];
+    loop {
+        let read = stream.read(&mut buffer).await?;
+        if read == 0 {
+            break;
+        }
+        header.extend_from_slice(&buffer[..read]);
+        if header.windows(4).any(|window| window == b"\r\n\r\n") {
+            break;
+        }
+        if header.len() > MAX_HEADER_BYTES {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "egress header too large",
+            ));
+        }
+    }
+    Ok(header)
+}
+
+fn authority_host(authority: &str) -> &str {
+    let host = authority
+        .rsplit_once('@')
+        .map_or(authority, |(_, host)| host);
+    host.trim_start_matches('[').split_once(']').map_or_else(
+        || host.rsplit_once(':').map_or(host, |(host, _)| host),
+        |(host, _)| host,
+    )
+}
+
+fn is_blocked_llm_provider(host: &str) -> bool {
+    let host = host.trim_end_matches('.').to_ascii_lowercase();
+    [
+        "api.openai.com",
+        "api.anthropic.com",
+        "openrouter.ai",
+        "generativelanguage.googleapis.com",
+        "api.mistral.ai",
+        "api.groq.com",
+    ]
+    .iter()
+    .any(|domain| host == *domain || host.ends_with(&format!(".{domain}")))
+}
+
 #[allow(clippy::too_many_lines)] // Agent startup and shutdown sequence is clearest in order.
 async fn run_agent_command(root: &Path, args: &ArgMatches, trace_enabled: bool) -> ExitCode {
     let agent = args
@@ -1377,7 +1515,14 @@ async fn run_agent_command(root: &Path, args: &ArgMatches, trace_enabled: bool) 
     eprintln!("- managed provider request/response proxy: available");
     eprintln!("- interactive terminal output sanitization: unavailable");
     eprintln!("- direct filesystem/network bypass prevention: unavailable");
-    eprintln!("- direct known-provider egress blocking: unavailable until egress guard lands");
+    eprintln!(
+        "- direct known-provider egress blocking: {}",
+        if args.get_flag("guard") {
+            "enabled for proxy-aware clients"
+        } else {
+            "unavailable without --guard"
+        }
+    );
     eprintln!(
         "- agent file reads: unmediated; if the agent opens .env directly, it can see raw contents"
     );
@@ -1445,13 +1590,44 @@ async fn run_agent_command(root: &Path, args: &ArgMatches, trace_enabled: bool) 
     let cancellation = CancellationToken::new();
     let proxy_cancellation = cancellation.clone();
     let proxy_task = tokio::spawn(bound.serve(proxy_cancellation));
+    let egress = if args.get_flag("guard") {
+        match BoundEgressGuard::bind().await {
+            Ok(guard) => Some(guard),
+            Err(error) => {
+                cancellation.cancel();
+                let _ = proxy_task.await;
+                return fail(&format!("could not start egress guard: {}", error.kind()));
+            }
+        }
+    } else {
+        None
+    };
+    let egress_origin = egress
+        .as_ref()
+        .map(|guard| format!("http://{}", guard.local_addr()));
+    if let Some(origin) = &egress_origin {
+        eprintln!("- egress guard proxy: {origin}");
+    }
+    let egress_task = egress.map(|guard| {
+        let cancellation = cancellation.clone();
+        tokio::spawn(guard.serve(cancellation))
+    });
 
     let mut command = tokio::process::Command::new(agent_command);
     configure_managed_agent_environment(&mut command);
     configure_agent_command(agent, &mut command, &agent_args, &proxy_origin);
+    if let Some(origin) = &egress_origin {
+        command.env("HTTP_PROXY", origin);
+        command.env("HTTPS_PROXY", origin);
+        command.env("ALL_PROXY", origin);
+        command.env("NO_PROXY", "localhost,127.0.0.1,::1");
+    }
     let status = command.status().await;
     cancellation.cancel();
     let _ = proxy_task.await;
+    if let Some(task) = egress_task {
+        let _ = task.await;
+    }
     if trace_sink.is_some_and(|sink| sink.failed()) {
         return fail("one or more request traces could not be persisted safely");
     }
@@ -1859,4 +2035,50 @@ fn exit_from_code(code: Option<i32>) -> ExitCode {
 fn fail(message: &str) -> ExitCode {
     eprintln!("error: {message}");
     ExitCode::FAILURE
+}
+
+#[cfg(test)]
+mod tests {
+    use tokio_util::sync::CancellationToken;
+
+    use super::{BoundEgressGuard, authority_host, is_blocked_llm_provider};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpStream;
+
+    #[test]
+    fn egress_guard_identifies_blocked_llm_provider_hosts() {
+        assert_eq!(authority_host("api.openai.com:443"), "api.openai.com");
+        assert_eq!(
+            authority_host("user@api.anthropic.com:443"),
+            "api.anthropic.com"
+        );
+        assert_eq!(authority_host("[::1]:443"), "::1");
+        assert!(is_blocked_llm_provider("api.openai.com"));
+        assert!(is_blocked_llm_provider("sub.openrouter.ai"));
+        assert!(is_blocked_llm_provider("generativelanguage.googleapis.com"));
+        assert!(!is_blocked_llm_provider("registry.npmjs.org"));
+        assert!(!is_blocked_llm_provider("example.com"));
+    }
+
+    #[tokio::test]
+    async fn egress_guard_blocks_direct_llm_connect() -> Result<(), Box<dyn std::error::Error>> {
+        let guard = BoundEgressGuard::bind().await?;
+        let address = guard.local_addr();
+        let cancellation = CancellationToken::new();
+        let task = tokio::spawn(guard.serve(cancellation.clone()));
+
+        let mut stream = TcpStream::connect(address).await?;
+        stream
+            .write_all(b"CONNECT api.openai.com:443 HTTP/1.1\r\nHost: api.openai.com:443\r\n\r\n")
+            .await?;
+        let mut response = vec![0_u8; 256];
+        let read = stream.read(&mut response).await?;
+        let response = String::from_utf8_lossy(&response[..read]);
+        assert!(response.starts_with("HTTP/1.1 403 Forbidden"));
+        assert!(response.contains("Blocked direct LLM provider access"));
+
+        cancellation.cancel();
+        task.await??;
+        Ok(())
+    }
 }

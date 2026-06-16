@@ -56,7 +56,9 @@ blindfold run --guard codex -- --sandbox workspace-write
 ```
 
 Blindfold starts a temporary local proxy, launches Codex, and stops the proxy when
-Codex exits. It does not permanently edit Codex configuration.
+Codex exits. Guard mode also sets proxy environment variables so proxy-aware clients
+cannot tunnel directly to known LLM providers. It does not permanently edit Codex
+configuration.
 
 Managed mode does not pass parent API-key variables or unrelated secrets to Codex.
 Sign in through Codex's persistent credential store first. Use `--no-proxy` only when

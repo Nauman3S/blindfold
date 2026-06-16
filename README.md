@@ -286,10 +286,11 @@ BLINDFOLD_BYPASS=1 codex review
 blindfold run codex --no-proxy -- review
 ```
 
-The wrapper prints protected and unavailable controls before launch. It currently
-sanitizes supported provider traffic, but not interactive terminal output, and it cannot
-prevent direct filesystem or network bypasses. `--strict` refuses to start while those
-controls remain unavailable.
+The wrapper prints protected and unavailable controls before launch. Guard mode
+sanitizes supported provider traffic and blocks direct known-provider CONNECT tunnels
+for proxy-aware clients. It does not sanitize interactive terminal output, mediate
+local file reads, or control network clients that ignore proxy settings. `--strict`
+refuses to start while full workspace controls remain unavailable.
 
 Important: `blindfold run ...` does not mediate agent file reads. If OpenCode, Codex,
 or Claude opens `.env` directly from the project, it can read the raw file. Trace

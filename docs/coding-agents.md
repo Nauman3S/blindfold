@@ -91,10 +91,12 @@ visible `--no-proxy` bypass until a credential broker is implemented.
 
 ## Current Boundary
 
-The wrappers sanitize supported provider JSON and SSE request/response fields. They do
-not currently sanitize interactive terminal output, broker provider credentials, or
-prevent direct filesystem and network access. `--strict` therefore refuses to start
-instead of claiming those controls exist.
+The wrappers sanitize supported provider JSON and SSE request/response fields. Guard
+mode also sets proxy environment variables and blocks direct known-provider CONNECT
+tunnels for proxy-aware clients. They do not currently sanitize interactive terminal
+output, broker provider credentials, mediate direct filesystem access, or control
+network clients that ignore proxy settings. `--strict` therefore refuses to start
+instead of claiming full workspace controls exist.
 
 Agent file reads are not mediated. If an agent opens `.env`, `.env.local`, or any other
 project file directly, it reads the file from disk exactly as stored. Use `blindfold

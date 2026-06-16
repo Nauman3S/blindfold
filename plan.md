@@ -1172,30 +1172,32 @@ do not bypass the LLM redaction proxy.
 
 **Required tasks:**
 
-- [ ] `P4B-01` Implement an explicit local egress proxy on `127.0.0.1:8789`.
-- [ ] `P4B-02` Set `HTTP_PROXY`, `HTTPS_PROXY`, compatible proxy variables, and
+- [x] `P4B-01` Implement an explicit local egress proxy on an ephemeral loopback port.
+- [x] `P4B-02` Set `HTTP_PROXY`, `HTTPS_PROXY`, compatible proxy variables, and
   `NO_PROXY` for guarded agent processes.
-- [ ] `P4B-03` Block direct `CONNECT` traffic to known LLM providers, including
+- [x] `P4B-03` Block direct `CONNECT` traffic to known LLM providers, including
   OpenAI, Anthropic, OpenRouter, Gemini, Mistral, and Groq.
-- [ ] `P4B-04` Allow common package and development registries by default policy.
+- [~] `P4B-04` Allow common package and development registries by default policy.
+  Current guard allows non-blocked CONNECT destinations; explicit allowlist policy
+  remains.
 - [ ] `P4B-05` Implement unknown-domain ask/block behavior with project-scoped allow
   and deny decisions.
 - [ ] `P4B-06` Add `bf allow domain ...`, `bf deny domain ...`, and `bf status`
   commands or equivalent policy subcommands.
 - [ ] `P4B-07` Log/audit destination decisions without request bodies, headers, query
   strings, or raw secrets.
-- [ ] `P4B-08` Document that v1 does not install a root CA and does not inspect
+- [x] `P4B-08` Document that v1 does not install a root CA and does not inspect
   arbitrary encrypted HTTPS bodies.
 
 **Exit criteria:**
 
-- [ ] Direct `CONNECT api.openai.com:443`, `api.anthropic.com:443`, and
+- [x] Direct `CONNECT api.openai.com:443`, `api.anthropic.com:443`, and
   `openrouter.ai:443` are blocked outside the Blindfold LLM proxy path.
 - [ ] `registry.npmjs.org`, `pypi.org`, `crates.io`, GitHub, and Go module mirrors
   are allowed by default policy.
 - [ ] Unknown domains ask or block according to `.blindfold.yaml`.
 - [ ] Egress guard logs and traces contain no raw payloads.
-- [ ] Startup output for guard mode clearly reports direct-provider blocking status.
+- [x] Startup output for guard mode clearly reports direct-provider blocking status.
 
 ### Phase 5: Secret Execution Runtime
 
@@ -1255,7 +1257,7 @@ protection boundary.
   clean up on exit.
 - [x] `P6-03B` Configure OpenRouter/OpenAI-compatible routing for OpenCode through
   Blindfold's local proxy.
-- [ ] `P6-03C` Start and configure the egress guard once P4B exists.
+- [x] `P6-03C` Start and configure the egress guard for guard-mode agent runs.
 - [!] `P6-04` Sanitize wrapper-managed stdout/stderr.
 - [!] `P6-05` Protect supported file/tool reads through documented hooks or broker
   integration only in strict/future modes; do not claim guard-mode local file-read
@@ -1274,7 +1276,7 @@ protection boundary.
 
 - [~] `blindfold run --guard claude|codex|opencode` launches installed agents and
   routes configured provider traffic; full clean-project provider demos remain.
-- [ ] Guard mode blocks direct known-provider egress once P4B lands.
+- [x] Guard mode blocks direct known-provider egress for proxy-aware clients.
 - [x] Startup output accurately reports the active boundary.
 - [x] Managed agents do not inherit the vault master key or unrelated parent secrets.
 - [x] Global `--trace` is explicit per invocation and produces independently clearable,
@@ -1565,7 +1567,7 @@ boundary in the first screenful.
 - [ ] Command stdout/stderr is sanitized while exit behavior is preserved.
 - [ ] `blindfold run --guard opencode|claude|codex` completes the documented
   end-to-end demo without raw secrets reaching the fake provider.
-- [ ] Guard mode blocks direct known-provider egress when the egress guard is enabled.
+- [x] Guard mode blocks direct known-provider egress for proxy-aware clients.
 - [x] Startup output distinguishes protected, degraded, and unprotected paths.
 - [x] Strict mode refuses to start when its required controls are unavailable.
 - [x] Vault list and audit output are useful without revealing raw values.

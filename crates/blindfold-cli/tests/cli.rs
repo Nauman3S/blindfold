@@ -73,7 +73,7 @@ fn fake_agent(directory: &Path) -> Result<PathBuf, std::io::Error> {
     let path = directory.join("fake-agent");
     fs::write(
         &path,
-        "#!/bin/sh\nprintf '%s\\n' \"$@\" > agent-args\nprintf '%s' \"${ANTHROPIC_BASE_URL-}\" > anthropic-base\nprintf '%s' \"${OPENCODE_CONFIG_CONTENT-}\" > opencode-config\nprintf '%s' \"${BLINDFOLD_MASTER_KEY-}\" > inherited-master-key\nprintf '%s' \"${UNRELATED_PARENT_SECRET-}\" > inherited-parent-secret\n",
+        "#!/bin/sh\nprintf '%s\\n' \"$@\" > agent-args\nprintf '%s' \"${ANTHROPIC_BASE_URL-}\" > anthropic-base\nprintf '%s' \"${OPENCODE_CONFIG_CONTENT-}\" > opencode-config\nprintf '%s' \"${HTTPS_PROXY-}\" > https-proxy\nprintf '%s' \"${BLINDFOLD_MASTER_KEY-}\" > inherited-master-key\nprintf '%s' \"${UNRELATED_PARENT_SECRET-}\" > inherited-parent-secret\n",
     )?;
     let mut permissions = fs::metadata(&path)?.permissions();
     permissions.set_mode(0o700);
@@ -667,6 +667,8 @@ fn claude_wrapper_routes_through_anthropic_proxy() -> Result<(), Box<dyn Error>>
     let base = fs::read_to_string(directory.path().join("anthropic-base"))?;
     assert!(base.starts_with("http://127.0.0.1:"));
     assert!(base.ends_with("/anthropic"));
+    let egress = fs::read_to_string(directory.path().join("https-proxy"))?;
+    assert!(egress.starts_with("http://127.0.0.1:"));
     Ok(())
 }
 
