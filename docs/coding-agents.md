@@ -89,6 +89,24 @@ variables or unrelated secrets. Authentication must use the agent's persistent
 credential store or login flow. Environment-only provider authentication requires a
 visible `--no-proxy` bypass until a credential broker is implemented.
 
+## Guard Egress Policy
+
+Guard mode sets `HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY`, and `NO_PROXY` for the child
+agent. Proxy-aware clients cannot open direct tunnels to known LLM providers such as
+OpenAI, Anthropic, OpenRouter, Gemini, Mistral, or Groq.
+
+Common development domains are allowed by default: GitHub, npm, PyPI, crates.io, and Go
+module mirrors. Unknown domains block by default until the project allows them:
+
+```sh
+blindfold allow domain api.example.com
+blindfold status
+blindfold deny domain api.example.com
+```
+
+This is destination control, not TLS body inspection. Blindfold does not install a root
+CA in v1 and does not inspect arbitrary encrypted HTTPS payloads.
+
 ## Current Boundary
 
 The wrappers sanitize supported provider JSON and SSE request/response fields. Guard

@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::env;
 use std::fs;
 use std::io::{self, BufRead, Read, Write};
@@ -48,6 +48,18 @@ use crate::{config, doctor};
 
 const MASTER_KEY_ENV: &str = "BLINDFOLD_MASTER_KEY";
 const BYPASS_ENV: &str = "BLINDFOLD_BYPASS";
+const DEFAULT_ALLOWED_DOMAINS: &[&str] = &[
+    "github.com",
+    "api.github.com",
+    "registry.npmjs.org",
+    "pypi.org",
+    "files.pythonhosted.org",
+    "crates.io",
+    "static.crates.io",
+    "index.crates.io",
+    "proxy.golang.org",
+    "sum.golang.org",
+];
 static NEXT_CLI_TRACE_ID: AtomicU64 = AtomicU64::new(1);
 
 pub(crate) async fn run() -> ExitCode {
@@ -75,6 +87,15 @@ pub(crate) async fn run() -> ExitCode {
         }),
         Some(("policy", args)) => traced_command(&root, trace_enabled, TraceRoute::Policy, || {
             policy_command(args)
+        }),
+        Some(("allow", args)) => traced_command(&root, trace_enabled, TraceRoute::Policy, || {
+            allow_command(&root, args)
+        }),
+        Some(("deny", args)) => traced_command(&root, trace_enabled, TraceRoute::Policy, || {
+            deny_command(&root, args)
+        }),
+        Some(("status", _)) => traced_command(&root, trace_enabled, TraceRoute::Policy, || {
+            status_command(&root)
         }),
         Some(("diff-check", args)) => {
             traced_command(&root, trace_enabled, TraceRoute::DiffCheck, || {
@@ -215,6 +236,19 @@ fn cli() -> Command {
                         ),
                 ),
         )
+        .subcommand(
+            Command::new("allow")
+                .about("Allow project-scoped network destinations")
+                .subcommand(Command::new("domain").arg(Arg::new("domain").required(true)))
+                .subcommand_required(true),
+        )
+        .subcommand(
+            Command::new("deny")
+                .about("Deny project-scoped network destinations")
+                .subcommand(Command::new("domain").arg(Arg::new("domain").required(true)))
+                .subcommand_required(true),
+        )
+        .subcommand(Command::new("status").about("Show safe Blindfold project status"))
         .subcommand(
             Command::new("diff-check")
                 .about("Scan added lines in a patch or Git diff")
@@ -804,6 +838,135 @@ fn policy_command(args: &ArgMatches) -> ExitCode {
     }
 }
 
+#[derive(Clone, Default, serde::Deserialize, serde::Serialize)]
+#[serde(default, deny_unknown_fields)]
+struct ProjectNetworkPolicy {
+    allow: BTreeSet<String>,
+    deny: BTreeSet<String>,
+}
+
+fn allow_command(root: &Path, args: &ArgMatches) -> ExitCode {
+    let Some(("domain", domain)) = args.subcommand() else {
+        return fail("allow subcommand is required");
+    };
+    let Some(domain) = domain.get_one::<String>("domain") else {
+        return fail("a domain is required");
+    };
+    let domain = match normalize_policy_domain(domain) {
+        Ok(domain) => domain,
+        Err(message) => return fail(message),
+    };
+    let mut policy = match load_project_network_policy(root) {
+        Ok(policy) => policy,
+        Err(message) => return fail(message),
+    };
+    policy.deny.remove(&domain);
+    policy.allow.insert(domain.clone());
+    if let Err(message) = save_project_network_policy(root, &policy) {
+        return fail(&message);
+    }
+    println!("Allowed domain for this project: {domain}");
+    ExitCode::SUCCESS
+}
+
+fn deny_command(root: &Path, args: &ArgMatches) -> ExitCode {
+    let Some(("domain", domain)) = args.subcommand() else {
+        return fail("deny subcommand is required");
+    };
+    let Some(domain) = domain.get_one::<String>("domain") else {
+        return fail("a domain is required");
+    };
+    let domain = match normalize_policy_domain(domain) {
+        Ok(domain) => domain,
+        Err(message) => return fail(message),
+    };
+    let mut policy = match load_project_network_policy(root) {
+        Ok(policy) => policy,
+        Err(message) => return fail(message),
+    };
+    policy.allow.remove(&domain);
+    policy.deny.insert(domain.clone());
+    if let Err(message) = save_project_network_policy(root, &policy) {
+        return fail(&message);
+    }
+    println!("Denied domain for this project: {domain}");
+    ExitCode::SUCCESS
+}
+
+fn status_command(root: &Path) -> ExitCode {
+    let policy = match load_project_network_policy(root) {
+        Ok(policy) => policy,
+        Err(message) => return fail(message),
+    };
+    println!("Blindfold status");
+    println!(
+        "network default allow domains: {}",
+        DEFAULT_ALLOWED_DOMAINS.len()
+    );
+    println!("project allowed domains: {}", policy.allow.len());
+    for domain in &policy.allow {
+        println!("  allow {domain}");
+    }
+    println!("project denied domains: {}", policy.deny.len());
+    for domain in &policy.deny {
+        println!("  deny {domain}");
+    }
+    println!("unknown domains: block");
+    ExitCode::SUCCESS
+}
+
+fn normalize_policy_domain(input: &str) -> Result<String, &'static str> {
+    let domain = input.trim().trim_end_matches('.').to_ascii_lowercase();
+    if domain.is_empty()
+        || domain.len() > 253
+        || domain.starts_with('-')
+        || domain.ends_with('-')
+        || domain.contains("..")
+        || !domain
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-'))
+    {
+        return Err("domain must be a hostname using letters, digits, dots, or hyphens");
+    }
+    Ok(domain)
+}
+
+fn load_project_network_policy(root: &Path) -> Result<ProjectNetworkPolicy, &'static str> {
+    let path = project_network_policy_path(root);
+    let contents = match fs::read_to_string(&path) {
+        Ok(contents) => contents,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            return Ok(ProjectNetworkPolicy::default());
+        }
+        Err(_) => return Err("could not read project network policy"),
+    };
+    if contents.len() > 1024 * 1024 {
+        return Err("project network policy is too large");
+    }
+    serde_json::from_str(&contents).map_err(|_| "project network policy is invalid")
+}
+
+fn save_project_network_policy(root: &Path, policy: &ProjectNetworkPolicy) -> Result<(), String> {
+    let path = project_network_policy_path(root);
+    let Some(parent) = path.parent() else {
+        return Err("project network policy path is invalid".to_owned());
+    };
+    fs::create_dir_all(parent)
+        .map_err(|error| format!("could not create policy directory: {}", error.kind()))?;
+    let contents = serde_json::to_string_pretty(policy)
+        .map_err(|_| "could not serialize project network policy".to_owned())?;
+    let mut file = AtomicWriteFile::open(&path)
+        .map_err(|error| format!("could not write project network policy: {}", error.kind()))?;
+    file.write_all(contents.as_bytes())
+        .and_then(|()| file.write_all(b"\n"))
+        .and_then(|()| file.commit())
+        .map_err(|error| format!("could not write project network policy: {}", error.kind()))
+}
+
+fn project_network_policy_path(root: &Path) -> PathBuf {
+    root.join(".blindfold/network-policy.json")
+}
+
 fn diff_command(root: &Path, args: &ArgMatches) -> ExitCode {
     let report = if let Some(path) = args.get_one::<String>("patch") {
         match fs::read_to_string(path) {
@@ -1343,15 +1506,17 @@ fn read_bounded_line<R: BufRead>(
 struct BoundEgressGuard {
     listener: TcpListener,
     local_addr: SocketAddr,
+    policy: Arc<EgressNetworkPolicy>,
 }
 
 impl BoundEgressGuard {
-    async fn bind() -> io::Result<Self> {
+    async fn bind(policy: EgressNetworkPolicy) -> io::Result<Self> {
         let listener = TcpListener::bind("127.0.0.1:0").await?;
         let local_addr = listener.local_addr()?;
         Ok(Self {
             listener,
             local_addr,
+            policy: Arc::new(policy),
         })
     }
 
@@ -1365,8 +1530,9 @@ impl BoundEgressGuard {
                 () = cancellation.cancelled() => return Ok(()),
                 accepted = self.listener.accept() => {
                     let (stream, _) = accepted?;
+                    let policy = Arc::clone(&self.policy);
                     tokio::spawn(async move {
-                        let _ = handle_egress_connection(stream).await;
+                        let _ = handle_egress_connection(stream, policy).await;
                     });
                 }
             }
@@ -1374,52 +1540,130 @@ impl BoundEgressGuard {
     }
 }
 
-async fn handle_egress_connection(mut client: TcpStream) -> io::Result<()> {
+#[derive(Clone, Debug)]
+struct EgressNetworkPolicy {
+    allow: BTreeSet<String>,
+    deny: BTreeSet<String>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum EgressDecision {
+    Allow,
+    BlockKnownProvider,
+    BlockDenied,
+    BlockUnknown,
+}
+
+impl EgressNetworkPolicy {
+    fn load(root: &Path) -> Result<Self, &'static str> {
+        load_project_network_policy(root).map(Self::from_project)
+    }
+
+    fn from_project(project: ProjectNetworkPolicy) -> Self {
+        let mut allow = DEFAULT_ALLOWED_DOMAINS
+            .iter()
+            .map(|domain| (*domain).to_owned())
+            .collect::<BTreeSet<_>>();
+        allow.extend(project.allow);
+        Self {
+            allow,
+            deny: project.deny,
+        }
+    }
+
+    fn decision(&self, host: &str) -> EgressDecision {
+        let host = normalize_connect_host(host);
+        if is_blocked_llm_provider(&host) {
+            return EgressDecision::BlockKnownProvider;
+        }
+        if self.deny.iter().any(|domain| domain_matches(&host, domain)) {
+            return EgressDecision::BlockDenied;
+        }
+        if self
+            .allow
+            .iter()
+            .any(|domain| domain_matches(&host, domain))
+        {
+            return EgressDecision::Allow;
+        }
+        EgressDecision::BlockUnknown
+    }
+}
+
+impl Default for EgressNetworkPolicy {
+    fn default() -> Self {
+        Self::from_project(ProjectNetworkPolicy::default())
+    }
+}
+
+async fn handle_egress_connection(
+    mut client: TcpStream,
+    policy: Arc<EgressNetworkPolicy>,
+) -> io::Result<()> {
     let header = read_http_header(&mut client).await?;
     let Ok(header_text) = std::str::from_utf8(&header) else {
-        client
-            .write_all(b"HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\n\r\n")
-            .await?;
+        write_http_response(&mut client, "400 Bad Request", "").await?;
         return Ok(());
     };
     let Some(first_line) = header_text.lines().next() else {
-        client
-            .write_all(b"HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\n\r\n")
-            .await?;
+        write_http_response(&mut client, "400 Bad Request", "").await?;
         return Ok(());
     };
     let parts = first_line.split_whitespace().collect::<Vec<_>>();
     if parts.len() < 3 {
-        client
-            .write_all(b"HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\n\r\n")
-            .await?;
+        write_http_response(&mut client, "400 Bad Request", "").await?;
         return Ok(());
     }
     if parts[0].eq_ignore_ascii_case("CONNECT") {
-        return handle_connect(&mut client, parts[1]).await;
+        return handle_connect(&mut client, parts[1], &policy).await;
     }
-    client
-        .write_all(
-            b"HTTP/1.1 501 Not Implemented\r\nContent-Length: 55\r\n\r\nBlindfold egress guard currently supports CONNECT only.\n",
-        )
-        .await?;
+    write_http_response(
+        &mut client,
+        "501 Not Implemented",
+        "Blindfold egress guard currently supports CONNECT only.\n",
+    )
+    .await?;
     Ok(())
 }
 
-async fn handle_connect(client: &mut TcpStream, authority: &str) -> io::Result<()> {
+async fn handle_connect(
+    client: &mut TcpStream,
+    authority: &str,
+    policy: &EgressNetworkPolicy,
+) -> io::Result<()> {
     let host = authority_host(authority);
-    if is_blocked_llm_provider(host) {
-        client
-            .write_all(
-                b"HTTP/1.1 403 Forbidden\r\nContent-Length: 86\r\n\r\nBlocked direct LLM provider access; route provider traffic through Blindfold's LLM proxy.\n",
+    match policy.decision(host) {
+        EgressDecision::Allow => {}
+        EgressDecision::BlockKnownProvider => {
+            write_http_response(
+                client,
+                "403 Forbidden",
+                "Blocked direct LLM provider access; route provider traffic through Blindfold's LLM proxy.\n",
             )
             .await?;
-        return Ok(());
+            return Ok(());
+        }
+        EgressDecision::BlockDenied => {
+            write_http_response(
+                client,
+                "403 Forbidden",
+                "Blocked by Blindfold egress policy: domain is denied for this project.\n",
+            )
+            .await?;
+            return Ok(());
+        }
+        EgressDecision::BlockUnknown => {
+            write_http_response(
+                client,
+                "403 Forbidden",
+                "Blocked by Blindfold egress policy: unknown domains are blocked by default. Use `blindfold allow domain <host>` to allow this destination.\n",
+            )
+            .await?;
+            return Ok(());
+        }
     }
     let Ok(mut upstream) = TcpStream::connect(authority).await else {
-        client
-            .write_all(b"HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\n\r\n")
-            .await?;
+        write_http_response(client, "502 Bad Gateway", "").await?;
         return Ok(());
     };
     client
@@ -1427,6 +1671,18 @@ async fn handle_connect(client: &mut TcpStream, authority: &str) -> io::Result<(
         .await?;
     let _ = tokio::io::copy_bidirectional(client, &mut upstream).await;
     Ok(())
+}
+
+async fn write_http_response(client: &mut TcpStream, status: &str, body: &str) -> io::Result<()> {
+    client
+        .write_all(
+            format!(
+                "HTTP/1.1 {status}\r\nConnection: close\r\nContent-Length: {}\r\n\r\n{body}",
+                body.len()
+            )
+            .as_bytes(),
+        )
+        .await
 }
 
 async fn read_http_header(stream: &mut TcpStream) -> io::Result<Vec<u8>> {
@@ -1462,8 +1718,19 @@ fn authority_host(authority: &str) -> &str {
     )
 }
 
+fn normalize_connect_host(host: &str) -> String {
+    host.trim_end_matches('.').to_ascii_lowercase()
+}
+
+fn domain_matches(host: &str, domain: &str) -> bool {
+    host == domain
+        || host
+            .strip_suffix(domain)
+            .is_some_and(|prefix| prefix.ends_with('.'))
+}
+
 fn is_blocked_llm_provider(host: &str) -> bool {
-    let host = host.trim_end_matches('.').to_ascii_lowercase();
+    let host = normalize_connect_host(host);
     [
         "api.openai.com",
         "api.anthropic.com",
@@ -1473,7 +1740,7 @@ fn is_blocked_llm_provider(host: &str) -> bool {
         "api.groq.com",
     ]
     .iter()
-    .any(|domain| host == *domain || host.ends_with(&format!(".{domain}")))
+    .any(|domain| domain_matches(&host, domain))
 }
 
 #[allow(clippy::too_many_lines)] // Agent startup and shutdown sequence is clearest in order.
@@ -1519,6 +1786,14 @@ async fn run_agent_command(root: &Path, args: &ArgMatches, trace_enabled: bool) 
         "- direct known-provider egress blocking: {}",
         if args.get_flag("guard") {
             "enabled for proxy-aware clients"
+        } else {
+            "unavailable without --guard"
+        }
+    );
+    eprintln!(
+        "- unknown egress domains: {}",
+        if args.get_flag("guard") {
+            "blocked unless allowed by project policy"
         } else {
             "unavailable without --guard"
         }
@@ -1591,7 +1866,15 @@ async fn run_agent_command(root: &Path, args: &ArgMatches, trace_enabled: bool) 
     let proxy_cancellation = cancellation.clone();
     let proxy_task = tokio::spawn(bound.serve(proxy_cancellation));
     let egress = if args.get_flag("guard") {
-        match BoundEgressGuard::bind().await {
+        let policy = match EgressNetworkPolicy::load(root) {
+            Ok(policy) => policy,
+            Err(message) => {
+                cancellation.cancel();
+                let _ = proxy_task.await;
+                return fail(message);
+            }
+        };
+        match BoundEgressGuard::bind(policy).await {
             Ok(guard) => Some(guard),
             Err(error) => {
                 cancellation.cancel();
@@ -2041,7 +2324,10 @@ fn fail(message: &str) -> ExitCode {
 mod tests {
     use tokio_util::sync::CancellationToken;
 
-    use super::{BoundEgressGuard, authority_host, is_blocked_llm_provider};
+    use super::{
+        BoundEgressGuard, EgressDecision, EgressNetworkPolicy, ProjectNetworkPolicy,
+        authority_host, is_blocked_llm_provider,
+    };
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpStream;
 
@@ -2060,9 +2346,40 @@ mod tests {
         assert!(!is_blocked_llm_provider("example.com"));
     }
 
+    #[test]
+    fn egress_policy_decides_allow_deny_provider_and_unknown_domains() {
+        let policy = EgressNetworkPolicy::from_project(ProjectNetworkPolicy {
+            allow: ["api.example.com".to_owned()].into_iter().collect(),
+            deny: ["blocked.example.com".to_owned()].into_iter().collect(),
+        });
+
+        assert_eq!(policy.decision("registry.npmjs.org"), EgressDecision::Allow);
+        assert_eq!(policy.decision("api.example.com"), EgressDecision::Allow);
+        assert_eq!(
+            policy.decision("sub.api.example.com"),
+            EgressDecision::Allow
+        );
+        assert_eq!(
+            policy.decision("blocked.example.com"),
+            EgressDecision::BlockDenied
+        );
+        assert_eq!(
+            policy.decision("sub.blocked.example.com"),
+            EgressDecision::BlockDenied
+        );
+        assert_eq!(
+            policy.decision("api.openai.com"),
+            EgressDecision::BlockKnownProvider
+        );
+        assert_eq!(
+            policy.decision("unknown.example"),
+            EgressDecision::BlockUnknown
+        );
+    }
+
     #[tokio::test]
     async fn egress_guard_blocks_direct_llm_connect() -> Result<(), Box<dyn std::error::Error>> {
-        let guard = BoundEgressGuard::bind().await?;
+        let guard = BoundEgressGuard::bind(EgressNetworkPolicy::default()).await?;
         let address = guard.local_addr();
         let cancellation = CancellationToken::new();
         let task = tokio::spawn(guard.serve(cancellation.clone()));
@@ -2076,6 +2393,28 @@ mod tests {
         let response = String::from_utf8_lossy(&response[..read]);
         assert!(response.starts_with("HTTP/1.1 403 Forbidden"));
         assert!(response.contains("Blocked direct LLM provider access"));
+
+        cancellation.cancel();
+        task.await??;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn egress_guard_blocks_unknown_connect() -> Result<(), Box<dyn std::error::Error>> {
+        let guard = BoundEgressGuard::bind(EgressNetworkPolicy::default()).await?;
+        let address = guard.local_addr();
+        let cancellation = CancellationToken::new();
+        let task = tokio::spawn(guard.serve(cancellation.clone()));
+
+        let mut stream = TcpStream::connect(address).await?;
+        stream
+            .write_all(b"CONNECT unknown.example:443 HTTP/1.1\r\nHost: unknown.example:443\r\n\r\n")
+            .await?;
+        let mut response = vec![0_u8; 512];
+        let read = stream.read(&mut response).await?;
+        let response = String::from_utf8_lossy(&response[..read]);
+        assert!(response.starts_with("HTTP/1.1 403 Forbidden"));
+        assert!(response.contains("unknown domains are blocked"));
 
         cancellation.cancel();
         task.await??;

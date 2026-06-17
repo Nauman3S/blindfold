@@ -60,6 +60,21 @@ Codex exits. Guard mode also sets proxy environment variables so proxy-aware cli
 cannot tunnel directly to known LLM providers. It does not permanently edit Codex
 configuration.
 
+Guard mode allows common development services such as GitHub, npm, PyPI, crates.io,
+and Go module mirrors. Unknown domains are blocked by default. If your project needs a
+specific destination, allow it for this project:
+
+```sh
+blindfold allow domain api.example.com
+blindfold status
+```
+
+Remove access with:
+
+```sh
+blindfold deny domain api.example.com
+```
+
 Managed mode does not pass parent API-key variables or unrelated secrets to Codex.
 Sign in through Codex's persistent credential store first. Use `--no-proxy` only when
 you intentionally need the native environment for one run.

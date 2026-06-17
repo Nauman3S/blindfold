@@ -524,6 +524,31 @@ fn policy_diff_and_mcp_commands_are_safe() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
+#[test]
+fn network_policy_commands_are_project_scoped() -> Result<(), Box<dyn Error>> {
+    let directory = TestDirectory::new()?;
+
+    let allow = blindfold(directory.path(), &["allow", "domain", "API.EXAMPLE.COM."])?;
+    assert!(allow.status.success(), "{}", stderr(&allow));
+    assert!(stdout(&allow).contains("api.example.com"));
+
+    let deny = blindfold(directory.path(), &["deny", "domain", "blocked.example.com"])?;
+    assert!(deny.status.success(), "{}", stderr(&deny));
+    assert!(stdout(&deny).contains("blocked.example.com"));
+
+    let status = blindfold(directory.path(), &["status"])?;
+    let status_stdout = stdout(&status);
+    assert!(status.status.success(), "{}", stderr(&status));
+    assert!(status_stdout.contains("allow api.example.com"));
+    assert!(status_stdout.contains("deny blocked.example.com"));
+    assert!(status_stdout.contains("unknown domains: block"));
+
+    let policy = fs::read_to_string(directory.path().join(".blindfold/network-policy.json"))?;
+    assert!(policy.contains("api.example.com"));
+    assert!(policy.contains("blocked.example.com"));
+    Ok(())
+}
+
 #[cfg(unix)]
 #[test]
 fn audit_rejects_a_symlink_without_printing_its_target() -> Result<(), Box<dyn Error>> {

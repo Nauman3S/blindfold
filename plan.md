@@ -1177,12 +1177,10 @@ do not bypass the LLM redaction proxy.
   `NO_PROXY` for guarded agent processes.
 - [x] `P4B-03` Block direct `CONNECT` traffic to known LLM providers, including
   OpenAI, Anthropic, OpenRouter, Gemini, Mistral, and Groq.
-- [~] `P4B-04` Allow common package and development registries by default policy.
-  Current guard allows non-blocked CONNECT destinations; explicit allowlist policy
-  remains.
-- [ ] `P4B-05` Implement unknown-domain ask/block behavior with project-scoped allow
-  and deny decisions.
-- [ ] `P4B-06` Add `bf allow domain ...`, `bf deny domain ...`, and `bf status`
+- [x] `P4B-04` Allow common package and development registries by default policy.
+- [~] `P4B-05` Implement unknown-domain ask/block behavior with project-scoped allow
+  and deny decisions. Unknown domains now block by default; interactive ask UX remains.
+- [x] `P4B-06` Add `bf allow domain ...`, `bf deny domain ...`, and `bf status`
   commands or equivalent policy subcommands.
 - [ ] `P4B-07` Log/audit destination decisions without request bodies, headers, query
   strings, or raw secrets.
@@ -1193,9 +1191,9 @@ do not bypass the LLM redaction proxy.
 
 - [x] Direct `CONNECT api.openai.com:443`, `api.anthropic.com:443`, and
   `openrouter.ai:443` are blocked outside the Blindfold LLM proxy path.
-- [ ] `registry.npmjs.org`, `pypi.org`, `crates.io`, GitHub, and Go module mirrors
+- [x] `registry.npmjs.org`, `pypi.org`, `crates.io`, GitHub, and Go module mirrors
   are allowed by default policy.
-- [ ] Unknown domains ask or block according to `.blindfold.yaml`.
+- [x] Unknown domains block unless allowed by the project network policy.
 - [ ] Egress guard logs and traces contain no raw payloads.
 - [x] Startup output for guard mode clearly reports direct-provider blocking status.
 

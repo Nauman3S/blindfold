@@ -21,6 +21,10 @@ project follows Semantic Versioning as described in
 - Explicit guard-mode spelling with `blindfold run --guard ...`.
 - Guard mode starts a CONNECT egress guard and sets proxy environment variables for the
   agent process, blocking direct known LLM provider tunnels for proxy-aware clients.
+- Project-scoped egress commands: `blindfold allow domain ...`, `blindfold deny domain ...`,
+  and `blindfold status`.
+- Guard egress now allows common development registries by default and blocks unknown
+  domains unless the project policy allows them.
 - OpenRouter routing for OpenCode through Blindfold's OpenAI-compatible proxy path.
 - `blindfold shell-init` and visible per-invocation wrapper opt-out support.
 - Secret detectors, redaction modes, bounded repository scanning, and safe reports.

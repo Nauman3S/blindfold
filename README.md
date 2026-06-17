@@ -261,6 +261,16 @@ unrelated secrets are not inherited. Authenticate the agent with its persistent
 credential store or login flow; environment-only provider authentication is not
 available in managed mode.
 
+Guard mode also sets proxy variables for the child process. Direct tunnels to known LLM
+providers are blocked, common development registries are allowed, and unknown domains
+block until you allow them for the project:
+
+```sh
+blindfold allow domain api.example.com
+blindfold status
+blindfold deny domain api.example.com
+```
+
 Keep typing the native command names by activating shell wrappers:
 
 ```sh
