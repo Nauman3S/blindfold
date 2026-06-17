@@ -27,6 +27,8 @@ project follows Semantic Versioning as described in
   domains unless the project policy allows them.
 - OpenRouter routing for OpenCode through Blindfold's OpenAI-compatible proxy path.
 - ADR 0005 documenting fail-closed proxy compatibility gates for supported agent modes.
+- ADR 0006 and Phase P4C documenting the explicit MITM/deep-inspection spike and proxy
+  crate evaluation.
 - `blindfold shell-init` and visible per-invocation wrapper opt-out support.
 - Secret detectors, redaction modes, bounded repository scanning, and safe reports.
 - Destination-aware policy presets and scoped restoration decisions.

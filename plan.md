@@ -915,6 +915,10 @@ The critical path is:
 `P0 Foundation -> P1 Detection -> P2 Policy/SafeRefs -> P3 Vault -> P4 Proxy
 -> P4B Egress Guard -> P5 Exec -> P6 Guard Mode Runner -> P7 Release hardening`
 
+`P4C Deep Inspection MITM` is a security-hardening branch. It may strengthen guard
+mode after proof, but it must not replace fail-closed application proxy gates until
+agent/provider compatibility tests prove raw fixtures never reach fake providers.
+
 The generated diff scanner and MCP proxy can begin after P2, but neither may delay the
 `v0.1.0` critical path unless a release gate depends on it.
 
@@ -931,6 +935,7 @@ format. Add a blocker link or note whenever status is `[!]`.
 | P3 | Encrypted vault and audit | `[~]` | Codex | TBD | P2 | `V-06`, `V-10` |
 | P4 | Local LLM proxy | `[~]` | Codex | TBD | P1-P3 | `V-07`, `V-11` |
 | P4B | Egress network guard | `[ ]` | Codex | TBD | P4 | Phase exit criteria |
+| P4C | Deep inspection MITM spike | `[ ]` | Codex | TBD | P4-P4B | Phase exit criteria |
 | P5 | Secret execution runtime | `[~]` | Codex | TBD | P1-P3 | `V-06`, `V-12` |
 | P6 | Guard mode agent runner | `[~]` | Codex | TBD | P4-P5, P4B for full guard | `V-05` |
 | P7 | Release hardening | `[~]` | Codex | TBD | P0-P6 | `V-01` through `V-18` |
@@ -1196,6 +1201,59 @@ do not bypass the LLM redaction proxy.
 - [x] Unknown domains block unless allowed by the project network policy.
 - [ ] Egress guard logs and traces contain no raw payloads.
 - [x] Startup output for guard mode clearly reports direct-provider blocking status.
+
+### Phase 4C: Deep Inspection MITM Spike
+
+**Goal:** Evaluate whether an explicit opt-in MITM mode can cover agent transports that
+application base-URL routing cannot, without claiming impossible protection.
+
+**Depends on:** P4-P4B
+
+**Library findings as of 2026-06-17:**
+
+- `hudsucker` `0.24.1` is the leading spike candidate. It is current, dual
+  MIT/Apache-2.0, Rust 1.85+, supports HTTP/S request and response modification,
+  WebSocket message modification, `rcgen` CA generation, rustls client support, and
+  optional HTTP/2.
+- `http-mitm-proxy` `0.18.0` is a viable fallback. It is current, MIT, based on
+  Hyper 1.x, `tokio-rustls`, `rcgen`, and supports SSE. Its WebSocket handling is raw
+  traffic only, so Blindfold would still need WebSocket frame parsing/redaction.
+- `third-wheel` `0.6.0` is not a primary candidate. It is older, MIT, and its package
+  describes alpha status; keep it as background art only unless the first two fail.
+
+**Required tasks:**
+
+- [ ] `P4C-01` Create a feature-gated `bf proxy --mitm` spike using `hudsucker` with
+  only the required features enabled.
+- [ ] `P4C-02` Generate or load a local Blindfold CA under owner-only storage and never
+  print private-key material.
+- [ ] `P4C-03` Add explicit trust UX: print CA path and per-tool instructions; do not
+  silently install a root CA.
+- [ ] `P4C-04` Spawn guarded agents with proxy and certificate env vars where supported,
+  and detect when the agent does not honor them.
+- [ ] `P4C-05` Parse and sanitize provider HTTP JSON, SSE, and WebSocket frames before
+  forwarding; unsupported frames fail closed.
+- [ ] `P4C-06` Keep direct-provider egress blocks enabled so traffic that bypasses the
+  MITM proxy is denied, not leaked.
+- [ ] `P4C-07` Add fake-upstream tests for OpenAI, Anthropic, OpenRouter, OpenCode
+  `run`, OpenCode TUI/server mode, Claude, and Codex `exec`/`review`.
+- [ ] `P4C-08` Add negative tests for pinned cert failures, clients ignoring proxy env
+  vars, unsupported HTTP/2/WebSocket cases, QUIC/UDP attempts, and raw TCP egress.
+- [ ] `P4C-09` Document that MITM mode does not protect against local file reads,
+  clients that ignore proxy settings and are not blocked by egress controls,
+  certificate pinning, QUIC unless blocked, raw sockets, or a malicious local process.
+
+**Exit criteria:**
+
+- [ ] A raw fixture in every documented agent/provider mode reaches the fake provider
+  only as redacted text.
+- [ ] Unsupported transports and certificate-pinned clients fail closed without
+  forwarding request bodies.
+- [ ] No raw fixture appears in proxy errors, logs, traces, agent-visible output, or
+  fake upstream captures.
+- [ ] The default guard mode remains usable without installing a root CA.
+- [ ] Dependency review documents enabled features, transitive TLS crates, maintenance
+  status, licenses, and why the chosen proxy crate is preferable to custom MITM code.
 
 ### Phase 5: Secret Execution Runtime
 

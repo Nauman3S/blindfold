@@ -10,3 +10,4 @@ fixes. A later decision should supersede an earlier one when direction changes.
 | [0003](0003-saferef-format.md) | Versioned opaque SafeRef envelope | Accepted |
 | [0004](0004-managed-boundary-and-platforms.md) | Managed boundary; macOS/Linux support | Accepted |
 | [0005](0005-proxy-fail-closed-compatibility.md) | Proxy fail-closed compatibility gates | Accepted |
+| [0006](0006-mitm-proxy-library-evaluation.md) | MITM proxy library evaluation | Proposed spike |
