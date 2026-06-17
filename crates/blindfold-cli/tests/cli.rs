@@ -81,6 +81,27 @@ fn fake_agent(directory: &Path) -> Result<PathBuf, std::io::Error> {
     Ok(path)
 }
 
+fn fake_connect_agent(directory: &Path) -> Result<PathBuf, std::io::Error> {
+    let path = directory.join("fake-connect-agent");
+    fs::write(
+        &path,
+        r#"#!/bin/sh
+ruby -rsocket -ruri -e '
+proxy = URI(ENV.fetch("HTTPS_PROXY"))
+socket = TCPSocket.new(proxy.host, proxy.port)
+socket.write("CONNECT unknown.example:443 HTTP/1.1\r\nHost: unknown.example:443\r\n\r\n")
+response = socket.readpartial(256)
+File.write("connect-response", response)
+socket.close
+'
+"#,
+    )?;
+    let mut permissions = fs::metadata(&path)?.permissions();
+    permissions.set_mode(0o700);
+    fs::set_permissions(&path, permissions)?;
+    Ok(path)
+}
+
 #[test]
 fn help_and_version_are_available() -> Result<(), Box<dyn Error>> {
     let directory = TestDirectory::new()?;
@@ -244,6 +265,42 @@ fn traced_agent_session_reports_unmediated_file_reads() -> Result<(), Box<dyn Er
     assert!(output.contains("activity: run:opencode"));
     assert!(output.contains("coverage: degraded"));
     assert!(output.contains("issue: direct_filesystem_unmediated"));
+    Ok(())
+}
+
+#[test]
+fn traced_guard_records_payload_free_egress_decisions() -> Result<(), Box<dyn Error>> {
+    let directory = TestDirectory::new()?;
+    let agent = fake_connect_agent(directory.path())?;
+    let output = Command::new(env!("CARGO_BIN_EXE_blindfold"))
+        .args([
+            "run",
+            "--guard",
+            "opencode",
+            "--trace",
+            "--agent-command",
+            agent.to_str().ok_or("non-UTF-8 agent path")?,
+        ])
+        .current_dir(directory.path())
+        .output()?;
+
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert!(
+        fs::read_to_string(directory.path().join("connect-response"))?
+            .starts_with("HTTP/1.1 403 Forbidden")
+    );
+    let trace = blindfold(directory.path(), &["trace", "list"])?;
+    let output = stdout(&trace);
+    assert!(trace.status.success(), "{}", stderr(&trace));
+    assert!(output.contains("route=egress"));
+    assert!(output.contains("outcome=rejected"));
+    assert!(!output.contains("unknown.example"));
+
+    let trace = blindfold(directory.path(), &["trace", "tail"])?;
+    let output = stdout(&trace);
+    assert!(trace.status.success(), "{}", stderr(&trace));
+    assert!(output.contains("activity: run:opencode"));
+    assert!(!output.contains("unknown.example"));
     Ok(())
 }
 

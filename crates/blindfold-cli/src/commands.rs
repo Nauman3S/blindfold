@@ -1309,6 +1309,7 @@ const fn trace_route_label(route: TraceRoute) -> &'static str {
         TraceRoute::Vault => "vault",
         TraceRoute::Audit => "audit",
         TraceRoute::Proxy => "proxy",
+        TraceRoute::Egress => "egress",
         TraceRoute::Mcp => "mcp",
         TraceRoute::RunClaude => "run:claude",
         TraceRoute::RunCodex => "run:codex",
@@ -1507,16 +1508,21 @@ struct BoundEgressGuard {
     listener: TcpListener,
     local_addr: SocketAddr,
     policy: Arc<EgressNetworkPolicy>,
+    trace_sink: Option<Arc<CliTraceSink>>,
 }
 
 impl BoundEgressGuard {
-    async fn bind(policy: EgressNetworkPolicy) -> io::Result<Self> {
+    async fn bind(
+        policy: EgressNetworkPolicy,
+        trace_sink: Option<Arc<CliTraceSink>>,
+    ) -> io::Result<Self> {
         let listener = TcpListener::bind("127.0.0.1:0").await?;
         let local_addr = listener.local_addr()?;
         Ok(Self {
             listener,
             local_addr,
             policy: Arc::new(policy),
+            trace_sink,
         })
     }
 
@@ -1531,8 +1537,9 @@ impl BoundEgressGuard {
                 accepted = self.listener.accept() => {
                     let (stream, _) = accepted?;
                     let policy = Arc::clone(&self.policy);
+                    let trace_sink = self.trace_sink.clone();
                     tokio::spawn(async move {
-                        let _ = handle_egress_connection(stream, policy).await;
+                        let _ = handle_egress_connection(stream, policy, trace_sink).await;
                     });
                 }
             }
@@ -1599,8 +1606,10 @@ impl Default for EgressNetworkPolicy {
 async fn handle_egress_connection(
     mut client: TcpStream,
     policy: Arc<EgressNetworkPolicy>,
+    trace_sink: Option<Arc<CliTraceSink>>,
 ) -> io::Result<()> {
     let header = read_http_header(&mut client).await?;
+    let header_len = u64::try_from(header.len()).unwrap_or(u64::MAX);
     let Ok(header_text) = std::str::from_utf8(&header) else {
         write_http_response(&mut client, "400 Bad Request", "").await?;
         return Ok(());
@@ -1615,7 +1624,7 @@ async fn handle_egress_connection(
         return Ok(());
     }
     if parts[0].eq_ignore_ascii_case("CONNECT") {
-        return handle_connect(&mut client, parts[1], &policy).await;
+        return handle_connect(&mut client, parts[1], &policy, trace_sink, header_len).await;
     }
     write_http_response(
         &mut client,
@@ -1630,11 +1639,20 @@ async fn handle_connect(
     client: &mut TcpStream,
     authority: &str,
     policy: &EgressNetworkPolicy,
+    trace_sink: Option<Arc<CliTraceSink>>,
+    header_len: u64,
 ) -> io::Result<()> {
     let host = authority_host(authority);
     match policy.decision(host) {
         EgressDecision::Allow => {}
         EgressDecision::BlockKnownProvider => {
+            emit_egress_trace(
+                trace_sink.as_deref(),
+                EgressDecision::BlockKnownProvider,
+                header_len,
+                TraceOutcome::Rejected,
+                None,
+            );
             write_http_response(
                 client,
                 "403 Forbidden",
@@ -1644,6 +1662,13 @@ async fn handle_connect(
             return Ok(());
         }
         EgressDecision::BlockDenied => {
+            emit_egress_trace(
+                trace_sink.as_deref(),
+                EgressDecision::BlockDenied,
+                header_len,
+                TraceOutcome::Rejected,
+                None,
+            );
             write_http_response(
                 client,
                 "403 Forbidden",
@@ -1653,6 +1678,13 @@ async fn handle_connect(
             return Ok(());
         }
         EgressDecision::BlockUnknown => {
+            emit_egress_trace(
+                trace_sink.as_deref(),
+                EgressDecision::BlockUnknown,
+                header_len,
+                TraceOutcome::Rejected,
+                None,
+            );
             write_http_response(
                 client,
                 "403 Forbidden",
@@ -1663,14 +1695,64 @@ async fn handle_connect(
         }
     }
     let Ok(mut upstream) = TcpStream::connect(authority).await else {
+        emit_egress_trace(
+            trace_sink.as_deref(),
+            EgressDecision::Allow,
+            header_len,
+            TraceOutcome::Failed,
+            Some(TraceIssue::UpstreamFailure),
+        );
         write_http_response(client, "502 Bad Gateway", "").await?;
         return Ok(());
     };
+    emit_egress_trace(
+        trace_sink.as_deref(),
+        EgressDecision::Allow,
+        header_len,
+        TraceOutcome::Succeeded,
+        None,
+    );
     client
         .write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n")
         .await?;
     let _ = tokio::io::copy_bidirectional(client, &mut upstream).await;
     Ok(())
+}
+
+fn emit_egress_trace(
+    sink: Option<&CliTraceSink>,
+    decision: EgressDecision,
+    request_bytes: u64,
+    outcome: TraceOutcome,
+    issue: Option<TraceIssue>,
+) {
+    let Some(sink) = sink else {
+        return;
+    };
+    let issue = issue.or(match decision {
+        EgressDecision::Allow => None,
+        EgressDecision::BlockKnownProvider
+        | EgressDecision::BlockDenied
+        | EgressDecision::BlockUnknown => Some(TraceIssue::RouteNotAllowed),
+    });
+    let coverage = if issue.is_none() {
+        TraceCoverage::Protected
+    } else {
+        TraceCoverage::Unprotected
+    };
+    let Ok(record) = TraceRecord::now(
+        next_trace_request_id(),
+        TraceRoute::Egress,
+        coverage,
+        outcome,
+        (request_bytes, request_bytes),
+        (0, 0),
+        Vec::new(),
+        issue,
+    ) else {
+        return;
+    };
+    sink.record(record);
 }
 
 async fn write_http_response(client: &mut TcpStream, status: &str, body: &str) -> io::Result<()> {
@@ -1879,7 +1961,7 @@ async fn run_agent_command(root: &Path, args: &ArgMatches, trace_enabled: bool) 
                 return fail(message);
             }
         };
-        match BoundEgressGuard::bind(policy).await {
+        match BoundEgressGuard::bind(policy, trace_sink.clone()).await {
             Ok(guard) => Some(guard),
             Err(error) => {
                 cancellation.cancel();
@@ -2391,7 +2473,7 @@ mod tests {
 
     #[tokio::test]
     async fn egress_guard_blocks_direct_llm_connect() -> Result<(), Box<dyn std::error::Error>> {
-        let guard = BoundEgressGuard::bind(EgressNetworkPolicy::default()).await?;
+        let guard = BoundEgressGuard::bind(EgressNetworkPolicy::default(), None).await?;
         let address = guard.local_addr();
         let cancellation = CancellationToken::new();
         let task = tokio::spawn(guard.serve(cancellation.clone()));
@@ -2413,7 +2495,7 @@ mod tests {
 
     #[tokio::test]
     async fn egress_guard_blocks_unknown_connect() -> Result<(), Box<dyn std::error::Error>> {
-        let guard = BoundEgressGuard::bind(EgressNetworkPolicy::default()).await?;
+        let guard = BoundEgressGuard::bind(EgressNetworkPolicy::default(), None).await?;
         let address = guard.local_addr();
         let cancellation = CancellationToken::new();
         let task = tokio::spawn(guard.serve(cancellation.clone()));

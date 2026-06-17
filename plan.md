@@ -1187,7 +1187,7 @@ do not bypass the LLM redaction proxy.
   and deny decisions. Unknown domains now block by default; interactive ask UX remains.
 - [x] `P4B-06` Add `bf allow domain ...`, `bf deny domain ...`, and `bf status`
   commands or equivalent policy subcommands.
-- [ ] `P4B-07` Log/audit destination decisions without request bodies, headers, query
+- [x] `P4B-07` Log/audit destination decisions without request bodies, headers, query
   strings, or raw secrets.
 - [x] `P4B-08` Document that v1 does not install a root CA and does not inspect
   arbitrary encrypted HTTPS bodies.
@@ -1199,7 +1199,7 @@ do not bypass the LLM redaction proxy.
 - [x] `registry.npmjs.org`, `pypi.org`, `crates.io`, GitHub, and Go module mirrors
   are allowed by default policy.
 - [x] Unknown domains block unless allowed by the project network policy.
-- [ ] Egress guard logs and traces contain no raw payloads.
+- [x] Egress guard logs and traces contain no raw payloads.
 - [x] Startup output for guard mode clearly reports direct-provider blocking status.
 
 ### Phase 4C: Deep Inspection MITM Spike

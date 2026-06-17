@@ -25,6 +25,8 @@ project follows Semantic Versioning as described in
   and `blindfold status`.
 - Guard egress now allows common development registries by default and blocks unknown
   domains unless the project policy allows them.
+- Guard egress decisions now emit payload-free trace records with no destination host,
+  headers, query strings, or request bodies.
 - OpenRouter routing for OpenCode through Blindfold's OpenAI-compatible proxy path.
 - ADR 0005 documenting fail-closed proxy compatibility gates for supported agent modes.
 - ADR 0006 and Phase P4C documenting the explicit MITM/deep-inspection spike and proxy

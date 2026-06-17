@@ -63,6 +63,8 @@ pub enum Route {
     Audit,
     /// A standalone proxy operation.
     Proxy,
+    /// A guarded outbound destination decision.
+    Egress,
     /// An MCP stdio operation.
     Mcp,
     /// A Claude Code wrapper session.
