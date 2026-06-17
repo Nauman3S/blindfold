@@ -34,6 +34,8 @@ project follows Semantic Versioning as described in
 - `blindfold shell-init` and visible per-invocation wrapper opt-out support.
 - Fake-upstream compatibility regression coverage for guarded Claude, Codex `exec`,
   and OpenCode `run` requests and responses.
+- Agent/provider compatibility matrix documenting proven, pending, and fail-closed
+  guarded wrapper modes.
 - Secret detectors, redaction modes, bounded repository scanning, and safe reports.
 - Destination-aware policy presets and scoped restoration decisions.
 - XChaCha20-Poly1305 local vault with safe audit metadata.

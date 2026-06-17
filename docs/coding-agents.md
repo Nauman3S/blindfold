@@ -87,6 +87,24 @@ It does not change persistent configuration.
   provider base URLs (`/openai/v1`, `/anthropic/v1`, and `/openrouter/v1`). Existing
   inline settings are retained.
 
+## Compatibility Matrix
+
+`Proven` means an automated fake-upstream regression sends a raw fixture through the
+managed agent path and verifies that the provider receives only redacted content and
+that the agent receives a redacted response.
+
+| Agent mode | Provider route | Inspectable transport | Credential source | Status | Notes |
+|---|---|---|---|---|---|
+| `claude` | Anthropic through `/anthropic/v1` | HTTP JSON; Anthropic SSE sanitization is supported by the proxy | Native Claude login/config; parent env credentials are stripped | Proven for HTTP JSON | Hooks, plugins, and version-specific transports are not separately mediated. |
+| `codex exec ...` | OpenAI through `/openai/v1` | HTTP JSON | Native Codex login/config; parent env credentials are stripped | Proven for HTTP JSON | Use this for guarded non-interactive Codex tasks. |
+| `codex review` | OpenAI through `/openai/v1` | HTTP JSON expected | Native Codex login/config; parent env credentials are stripped | Configured, fake-upstream proof pending | Guard injects the base URL, but this exact mode still needs provider-capture regression coverage. |
+| interactive `codex` | OpenAI WebSocket path | WebSocket | Native Codex login/config | Unsupported; fails closed | Blindfold refuses this mode before launch because WebSocket sanitization is not implemented. |
+| `opencode run ...` with OpenAI | OpenAI through `/openai/v1` | HTTP JSON | Native OpenCode login/config; parent env credentials are stripped | Proven for HTTP JSON | Current fake-upstream coverage exercises the OpenAI provider route. |
+| `opencode run ...` with Anthropic | Anthropic through `/anthropic/v1` | HTTP JSON; Anthropic SSE sanitization is supported by the proxy | Native OpenCode login/config; parent env credentials are stripped | Configured, fake-upstream proof pending | Runtime config is injected, but provider-capture coverage is still needed. |
+| `opencode run ...` with OpenRouter | OpenRouter through `/openrouter/v1` | OpenAI-compatible HTTP JSON | Native OpenCode login/config; parent env credentials are stripped | Configured, fake-upstream proof pending | Route is configured through the OpenAI-compatible proxy path. |
+| OpenCode TUI/server mode | OpenAI, Anthropic, and OpenRouter config overlay | Depends on OpenCode mode/plugins | Native OpenCode login/config | Preview, not proven | Use explicit `opencode run ...` for the currently tested guarded path. |
+| Agent plugins/tools | Varies | Varies | Varies | Not mediated by wrapper alone | Use `blindfold exec`, MCP stdio preview, or future broker integrations for scoped secret use. |
+
 The proxy exists only for the child process lifetime and binds to an ephemeral loopback
 port. The child receives an allowlisted environment and does not inherit parent API-key
 variables or unrelated secrets. Authentication must use the agent's persistent
@@ -126,6 +144,6 @@ redact FILE` for one-off inspection or `blindfold exec` for controlled child-pro
 secret injection. `run --trace` records the session as degraded with
 `direct_filesystem_unmediated`; it does not redact direct file reads.
 
-OpenCode providers other than `openai` and `anthropic` are not routed through Blindfold.
-Managed OpenCode settings may also override runtime configuration; verify organizational
-policy before relying on the wrapper.
+OpenCode providers other than `openai`, `anthropic`, and `openrouter` are not routed
+through Blindfold. Managed OpenCode settings may also override runtime configuration;
+verify organizational policy before relying on the wrapper.

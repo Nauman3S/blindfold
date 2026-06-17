@@ -1333,7 +1333,7 @@ protection boundary.
   `exec`, and OpenCode `run` now hit fake upstreams with redacted requests and receive
   redacted responses; Codex `review`, OpenCode TUI/server, OpenRouter, and trace-safety
   coverage remain.
-- [ ] `P6-12` Add an agent/provider compatibility matrix to docs covering HTTP JSON,
+- [x] `P6-12` Add an agent/provider compatibility matrix to docs covering HTTP JSON,
   SSE, WebSocket, plugins, credential source, and known unsupported modes.
 - [x] `P6-10` Write the Claude Code quickstart, limitations, troubleshooting, and demo.
 
