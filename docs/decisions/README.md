@@ -9,3 +9,4 @@ fixes. A later decision should supersede an earlier one when direction changes.
 | [0002](0002-vault-backend.md) | Encrypted local database with OS-protected key | Accepted direction |
 | [0003](0003-saferef-format.md) | Versioned opaque SafeRef envelope | Accepted |
 | [0004](0004-managed-boundary-and-platforms.md) | Managed boundary; macOS/Linux support | Accepted |
+| [0005](0005-proxy-fail-closed-compatibility.md) | Proxy fail-closed compatibility gates | Accepted |

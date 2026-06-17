@@ -16,7 +16,7 @@ use axum::{
     extract::{Path, State},
     http::{
         HeaderMap, HeaderName, HeaderValue, Method, Request, Response, Uri,
-        header::{CONNECTION, CONTENT_LENGTH, CONTENT_TYPE, HOST, TRANSFER_ENCODING},
+        header::{CONNECTION, CONTENT_LENGTH, CONTENT_TYPE, HOST, TRANSFER_ENCODING, UPGRADE},
     },
     response::IntoResponse,
     routing::any,
@@ -230,6 +230,7 @@ async fn forward_inner(
     if request.headers().contains_key(&LOOP_HEADER) {
         return Err(ProxyError::new(ErrorCode::ProxyLoop));
     }
+    reject_unsupported_transport(request.headers())?;
     reject_unsupported_method(request.method())?;
     reject_oversize_content_length(request.headers(), state.max_request_body)?;
 
@@ -322,6 +323,21 @@ fn reject_unsupported_method(method: &Method) -> Result<(), ProxyError> {
     } else {
         Ok(())
     }
+}
+
+fn reject_unsupported_transport(headers: &HeaderMap) -> Result<(), ProxyError> {
+    let has_upgrade_connection = headers
+        .get(CONNECTION)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| {
+            value
+                .split(',')
+                .any(|token| token.trim().eq_ignore_ascii_case("upgrade"))
+        });
+    if headers.contains_key(UPGRADE) || has_upgrade_connection {
+        return Err(ProxyError::new(ErrorCode::UnsupportedTransport));
+    }
+    Ok(())
 }
 
 fn reject_oversize_content_length(headers: &HeaderMap, limit: usize) -> Result<(), ProxyError> {
@@ -483,7 +499,7 @@ const fn issue_for(code: ErrorCode, source: BodySource) -> Issue {
         ErrorCode::RequestTooLarge => Issue::RequestTooLarge,
         ErrorCode::ResponseTooLarge => Issue::ResponseTooLarge,
         ErrorCode::InvalidJson => Issue::InvalidPayload,
-        ErrorCode::InvalidRequest => Issue::UnsupportedRequest,
+        ErrorCode::InvalidRequest | ErrorCode::UnsupportedTransport => Issue::UnsupportedRequest,
         ErrorCode::Timeout | ErrorCode::Cancelled => Issue::Timeout,
         ErrorCode::UpstreamFailure => match source {
             BodySource::Request => Issue::UpstreamFailure,

@@ -23,6 +23,8 @@ pub enum ErrorCode {
     InvalidJson,
     /// The request cannot be represented safely upstream.
     InvalidRequest,
+    /// The transport cannot be inspected by this application proxy.
+    UnsupportedTransport,
     /// The upstream exchange exceeded its deadline.
     Timeout,
     /// The operation was cancelled.
@@ -40,6 +42,7 @@ impl ErrorCode {
             Self::ResponseTooLarge => "response_too_large",
             Self::InvalidJson => "invalid_json",
             Self::InvalidRequest => "invalid_request",
+            Self::UnsupportedTransport => "unsupported_transport",
             Self::Timeout => "timeout",
             Self::Cancelled => "cancelled",
             Self::UpstreamFailure => "upstream_failure",
@@ -71,7 +74,9 @@ impl ProxyError {
             ErrorCode::RequestTooLarge | ErrorCode::ResponseTooLarge => {
                 StatusCode::PAYLOAD_TOO_LARGE
             }
-            ErrorCode::InvalidJson | ErrorCode::InvalidRequest => StatusCode::BAD_REQUEST,
+            ErrorCode::InvalidJson
+            | ErrorCode::InvalidRequest
+            | ErrorCode::UnsupportedTransport => StatusCode::BAD_REQUEST,
             ErrorCode::Timeout => StatusCode::GATEWAY_TIMEOUT,
             ErrorCode::Cancelled => StatusCode::SERVICE_UNAVAILABLE,
             ErrorCode::UpstreamFailure => StatusCode::BAD_GATEWAY,
@@ -90,13 +95,31 @@ impl std::error::Error for ProxyError {}
 impl IntoResponse for ProxyError {
     fn into_response(self) -> Response {
         let body = format!(
-            r#"{{"error":{{"code":"{}","message":"proxy request failed"}}}}"#,
-            self.code.as_str()
+            r#"{{"error":{{"code":"{}","message":"{}"}}}}"#,
+            self.code.as_str(),
+            self.code.message()
         );
         Response::builder()
             .status(self.status())
             .header(CONTENT_TYPE, "application/json")
             .body(Body::from(body))
             .unwrap_or_else(|_| Response::new(Body::empty()))
+    }
+}
+
+impl ErrorCode {
+    const fn message(self) -> &'static str {
+        match self {
+            Self::UpstreamNotAllowed => "proxy route is not allowlisted",
+            Self::ProxyLoop => "proxy loop rejected",
+            Self::RequestTooLarge => "request body is too large",
+            Self::ResponseTooLarge => "upstream response is too large",
+            Self::InvalidJson => "JSON or SSE payload could not be sanitized",
+            Self::InvalidRequest => "request method or content type is unsupported",
+            Self::UnsupportedTransport => "request transport is unsupported and was not forwarded",
+            Self::Timeout => "upstream exchange timed out",
+            Self::Cancelled => "proxy exchange was cancelled",
+            Self::UpstreamFailure => "upstream response could not be sanitized or completed",
+        }
     }
 }

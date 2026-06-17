@@ -1261,19 +1261,28 @@ protection boundary.
   integration only in strict/future modes; do not claim guard-mode local file-read
   interception.
 - [~] `P6-06` Detect common bypass conditions such as direct provider configuration,
-  unsupported agent version, or unavailable hooks. Managed children now use an
-  environment allowlist; credential brokering and version/hook checks remain.
+  unsupported agent version, unsupported transports, or unavailable hooks. Managed
+  children now use an environment allowlist; credential brokering and version/hook
+  checks remain. Interactive Codex fails closed because its current transport is
+  WebSocket-based and not yet sanitizable by Blindfold.
 - [x] `P6-07` Show startup status listing what is protected, degraded, or unprotected.
 - [x] `P6-08` Add `--strict` startup checks that refuse to run when required protections
   cannot be established.
 - [~] `P6-09` Add an end-to-end fake-agent test for `.env` SafeRefs, proxy sanitization,
   `blindfold exec`, and sanitized command output.
+- [ ] `P6-11` Add per-agent fake-upstream compatibility tests for Claude, Codex
+  `exec`/`review`, OpenCode `run`, and OpenCode TUI/server mode. A mode is supported
+  only when a raw fixture reaches the fake upstream redacted and unsupported transports
+  fail closed without forwarding.
+- [ ] `P6-12` Add an agent/provider compatibility matrix to docs covering HTTP JSON,
+  SSE, WebSocket, plugins, credential source, and known unsupported modes.
 - [x] `P6-10` Write the Claude Code quickstart, limitations, troubleshooting, and demo.
 
 **Exit criteria:**
 
-- [~] `blindfold run --guard claude|codex|opencode` launches installed agents and
-  routes configured provider traffic; full clean-project provider demos remain.
+- [~] `blindfold run --guard claude|codex|opencode` launches only modes with proven
+  compatible provider traffic. Unsupported transports must fail closed and not forward
+  request bodies.
 - [x] Guard mode blocks direct known-provider egress for proxy-aware clients.
 - [x] Startup output accurately reports the active boundary.
 - [x] Managed agents do not inherit the vault master key or unrelated parent secrets.
@@ -1285,8 +1294,8 @@ protection boundary.
 - [ ] Strict mode filesystem mediation or sandboxing prevents direct reads of sensitive
   project files without changing normal agent Git/worktree behavior inside the managed
   workspace.
-- [ ] The full demo passes without a raw fixture appearing in agent-visible output or
-  fake provider requests.
+- [ ] The full demo passes without a raw fixture appearing in agent-visible output,
+  fake provider requests, trace records, or proxy error bodies.
 - [x] Strict mode refuses known unsafe/degraded configurations.
 
 ### Phase 7: Release Hardening and `v0.1.0`
@@ -1565,6 +1574,9 @@ boundary in the first screenful.
 - [ ] Command stdout/stderr is sanitized while exit behavior is preserved.
 - [ ] `blindfold run --guard opencode|claude|codex` completes the documented
   end-to-end demo without raw secrets reaching the fake provider.
+- [ ] Every documented guarded agent mode has a fake-upstream regression test proving
+  request redaction, response redaction, trace safety, and fail-closed behavior for
+  unsupported transports.
 - [x] Guard mode blocks direct known-provider egress for proxy-aware clients.
 - [x] Startup output distinguishes protected, degraded, and unprotected paths.
 - [x] Strict mode refuses to start when its required controls are unavailable.

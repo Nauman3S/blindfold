@@ -256,6 +256,38 @@ async fn rejects_proxy_hop_marker() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 #[tokio::test]
+async fn rejects_websocket_upgrade_without_forwarding_body()
+-> Result<(), Box<dyn std::error::Error>> {
+    let capture = Capture::default();
+    let (upstream, upstream_stop) = spawn_upstream(capture.clone(), openai_response()).await?;
+    let (proxy, proxy_stop) = spawn_proxy(upstream, Provider::OpenAi).await?;
+
+    let response = reqwest::Client::new()
+        .post(format!("{proxy}/openai/v1/responses"))
+        .header("connection", "keep-alive, Upgrade")
+        .header("upgrade", "websocket")
+        .header(CONTENT_TYPE, "application/json")
+        .body(format!(r#"{{"input":"{SECRET}"}}"#))
+        .send()
+        .await?;
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body = response.text().await?;
+    assert!(!body.contains(SECRET));
+    assert!(body.contains("unsupported_transport"));
+    assert!(
+        capture
+            .bodies
+            .lock()
+            .map_err(|_| "capture poisoned")?
+            .is_empty()
+    );
+
+    proxy_stop.cancel();
+    let _ = upstream_stop.send(());
+    Ok(())
+}
+
+#[tokio::test]
 async fn bounds_chunked_upstream_responses() -> Result<(), Box<dyn std::error::Error>> {
     let capture = Capture::default();
     let response = streamed_response(

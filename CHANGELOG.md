@@ -26,6 +26,7 @@ project follows Semantic Versioning as described in
 - Guard egress now allows common development registries by default and blocks unknown
   domains unless the project policy allows them.
 - OpenRouter routing for OpenCode through Blindfold's OpenAI-compatible proxy path.
+- ADR 0005 documenting fail-closed proxy compatibility gates for supported agent modes.
 - `blindfold shell-init` and visible per-invocation wrapper opt-out support.
 - Secret detectors, redaction modes, bounded repository scanning, and safe reports.
 - Destination-aware policy presets and scoped restoration decisions.
@@ -47,6 +48,8 @@ project follows Semantic Versioning as described in
 
 - Interactive Codex guard runs now fail closed with an explicit WebSocket transport
   limitation instead of launching an unsupported proxy path.
+- Proxy upgrade/WebSocket requests now fail closed with a safe `unsupported_transport`
+  error before any request body is forwarded.
 - Traced agent sessions now explicitly report unmediated direct filesystem access
   instead of implying the whole session is protected.
 - Managed coding-agent wrappers no longer inherit the parent secret environment.
