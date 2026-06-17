@@ -1328,10 +1328,11 @@ protection boundary.
   cannot be established.
 - [~] `P6-09` Add an end-to-end fake-agent test for `.env` SafeRefs, proxy sanitization,
   `blindfold exec`, and sanitized command output.
-- [ ] `P6-11` Add per-agent fake-upstream compatibility tests for Claude, Codex
-  `exec`/`review`, OpenCode `run`, and OpenCode TUI/server mode. A mode is supported
-  only when a raw fixture reaches the fake upstream redacted and unsupported transports
-  fail closed without forwarding.
+- [~] `P6-11` Add per-agent fake-upstream compatibility tests for Claude, Codex
+  `exec`/`review`, OpenCode `run`, and OpenCode TUI/server mode. Claude, Codex
+  `exec`, and OpenCode `run` now hit fake upstreams with redacted requests and receive
+  redacted responses; Codex `review`, OpenCode TUI/server, OpenRouter, and trace-safety
+  coverage remain.
 - [ ] `P6-12` Add an agent/provider compatibility matrix to docs covering HTTP JSON,
   SSE, WebSocket, plugins, credential source, and known unsupported modes.
 - [x] `P6-10` Write the Claude Code quickstart, limitations, troubleshooting, and demo.
@@ -1630,8 +1631,9 @@ boundary in the first screenful.
 - [ ] Streaming sanitization catches a secret across every tested chunk boundary.
 - [ ] `blindfold exec --secret NAME -- COMMAND` injects only approved values.
 - [ ] Command stdout/stderr is sanitized while exit behavior is preserved.
-- [ ] `blindfold run --guard opencode|claude|codex` completes the documented
-  end-to-end demo without raw secrets reaching the fake provider.
+- [~] `blindfold run --guard opencode|claude|codex` completes the documented
+  fake-provider demo without raw secrets reaching the fake provider for Claude, Codex
+  `exec`, and OpenCode `run`; remaining documented variants still need coverage.
 - [ ] Every documented guarded agent mode has a fake-upstream regression test proving
   request redaction, response redaction, trace safety, and fail-closed behavior for
   unsupported transports.

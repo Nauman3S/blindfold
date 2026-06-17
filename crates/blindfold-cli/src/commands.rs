@@ -376,12 +376,12 @@ fn cli() -> Command {
                 .arg(
                     Arg::new("openai")
                         .long("openai-upstream")
-                        .default_value("https://api.openai.com/v1"),
+                        .default_value("https://api.openai.com"),
                 )
                 .arg(
                     Arg::new("openrouter")
                         .long("openrouter-upstream")
-                        .default_value("https://openrouter.ai/api/v1"),
+                        .default_value("https://openrouter.ai/api"),
                 )
                 .arg(
                     Arg::new("no_proxy")
@@ -2055,10 +2055,10 @@ fn agent_upstreams(agent: &str, args: &ArgMatches) -> Result<Vec<Upstream>, Exit
         .map_or("https://api.anthropic.com", String::as_str);
     let openai = args
         .get_one::<String>("openai")
-        .map_or("https://api.openai.com/v1", String::as_str);
+        .map_or("https://api.openai.com", String::as_str);
     let openrouter = args
         .get_one::<String>("openrouter")
-        .map_or("https://openrouter.ai/api/v1", String::as_str);
+        .map_or("https://openrouter.ai/api", String::as_str);
     let upstream = |name, url, provider| {
         Upstream::new(name, url, provider).map_err(|error| fail(&error.to_string()))
     };

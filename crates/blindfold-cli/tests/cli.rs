@@ -3,14 +3,21 @@
 use std::{
     error::Error,
     fs,
-    io::Write,
+    io::{Read, Write},
+    net::{TcpListener, TcpStream},
     os::unix::fs::PermissionsExt,
     path::{Path, PathBuf},
     process::{Command, Output, Stdio},
-    sync::atomic::{AtomicU64, Ordering},
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        mpsc,
+    },
+    thread,
+    time::Duration,
 };
 
 static NEXT_TEMP: AtomicU64 = AtomicU64::new(0);
+const PROVIDER_FIXTURE: &str = "sk-proj-abcdefghijklmnopqrstuvwxyz012345";
 
 struct TestDirectory(PathBuf);
 
@@ -100,6 +107,139 @@ socket.close
     permissions.set_mode(0o700);
     fs::set_permissions(&path, permissions)?;
     Ok(path)
+}
+
+fn fake_provider_agent(directory: &Path, mode: &str) -> Result<PathBuf, std::io::Error> {
+    let path = directory.join(format!("fake-provider-agent-{mode}"));
+    let script = format!(
+        r#"#!/bin/sh
+ruby -rjson -rnet/http -ruri -e '
+mode = "{mode}"
+secret = "{PROVIDER_FIXTURE}"
+case mode
+when "claude"
+  base = ENV.fetch("ANTHROPIC_BASE_URL")
+  uri = URI(base + "/v1/messages")
+  body = {{"messages"=>[{{"role"=>"user","content"=>[{{"type"=>"text","text"=>"send #{{secret}}"}}]}}]}}
+when "codex"
+  config = ARGV.join(" ")
+  raise "missing codex openai_base_url: #{{ARGV.inspect}}" unless config =~ /openai_base_url="?([^"\s]+)"?/
+  uri = URI($1 + "/responses")
+  body = {{"input"=>"send #{{secret}}"}}
+when "opencode"
+  config = JSON.parse(ENV.fetch("OPENCODE_CONFIG_CONTENT"))
+  uri = URI(config.fetch("provider").fetch("openai").fetch("options").fetch("baseURL") + "/chat/completions")
+  body = {{"messages"=>[{{"role"=>"user","content"=>"send #{{secret}}"}}]}}
+else
+  raise "unknown fake mode"
+end
+request = Net::HTTP::Post.new(uri)
+request["content-type"] = "application/json"
+request.body = JSON.generate(body)
+response = Net::HTTP.start(uri.host, uri.port, nil, nil) {{ |http| http.request(request) }}
+File.write("agent-response", response.body)
+puts response.body
+' -- "$@"
+"#,
+    );
+    fs::write(&path, script)?;
+    let mut permissions = fs::metadata(&path)?.permissions();
+    permissions.set_mode(0o700);
+    fs::set_permissions(&path, permissions)?;
+    Ok(path)
+}
+
+struct FakeProvider {
+    upstream: String,
+    request: mpsc::Receiver<CapturedProviderRequest>,
+    done: thread::JoinHandle<()>,
+}
+
+#[derive(Debug)]
+struct CapturedProviderRequest {
+    request_line: String,
+    body: String,
+}
+
+fn spawn_fake_provider(mode: &str) -> Result<FakeProvider, Box<dyn Error>> {
+    let listener = TcpListener::bind("127.0.0.1:0")?;
+    let upstream = format!("http://{}", listener.local_addr()?);
+    let (tx, rx) = mpsc::channel();
+    let response = match mode {
+        "claude" => {
+            format!(r#"{{"content":[{{"type":"text","text":"echo {PROVIDER_FIXTURE}"}}]}}"#)
+        }
+        "codex" => format!(r#"{{"output_text":"echo {PROVIDER_FIXTURE}"}}"#),
+        "opencode" => {
+            format!(r#"{{"choices":[{{"message":{{"content":"echo {PROVIDER_FIXTURE}"}}}}]}}"#)
+        }
+        _ => return Err("unknown fake provider mode".into()),
+    };
+    let done = thread::spawn(move || {
+        let Ok((mut stream, _)) = listener.accept() else {
+            return;
+        };
+        let Ok(request) = read_provider_request(&mut stream) else {
+            return;
+        };
+        let _ = tx.send(request);
+        let reply = format!(
+            "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+            response.len(),
+            response
+        );
+        let _ = stream.write_all(reply.as_bytes());
+    });
+    Ok(FakeProvider {
+        upstream,
+        request: rx,
+        done,
+    })
+}
+
+fn read_provider_request(
+    stream: &mut TcpStream,
+) -> Result<CapturedProviderRequest, Box<dyn Error>> {
+    stream.set_read_timeout(Some(Duration::from_secs(5)))?;
+    let mut buffer = Vec::new();
+    let mut chunk = [0_u8; 512];
+    loop {
+        let read = stream.read(&mut chunk)?;
+        if read == 0 {
+            break;
+        }
+        buffer.extend_from_slice(&chunk[..read]);
+        if let Some(header_end) = find_header_end(&buffer) {
+            let header = String::from_utf8_lossy(&buffer[..header_end]).into_owned();
+            let content_length = header
+                .lines()
+                .find_map(|line| {
+                    let (name, value) = line.split_once(':')?;
+                    name.eq_ignore_ascii_case("content-length")
+                        .then(|| value.trim().parse::<usize>().ok())?
+                })
+                .unwrap_or(0);
+            let body_start = header_end + 4;
+            while buffer.len().saturating_sub(body_start) < content_length {
+                let read = stream.read(&mut chunk)?;
+                if read == 0 {
+                    break;
+                }
+                buffer.extend_from_slice(&chunk[..read]);
+            }
+            let request_line = header.lines().next().unwrap_or_default().to_owned();
+            let body = String::from_utf8_lossy(
+                &buffer[body_start..body_start.saturating_add(content_length)],
+            )
+            .into_owned();
+            return Ok(CapturedProviderRequest { request_line, body });
+        }
+    }
+    Err("provider request was incomplete".into())
+}
+
+fn find_header_end(buffer: &[u8]) -> Option<usize> {
+    buffer.windows(4).position(|window| window == b"\r\n\r\n")
 }
 
 #[test]
@@ -842,6 +982,119 @@ fn opencode_wrapper_merges_inline_config_and_routes_both_providers() -> Result<(
         config["provider"]["openrouter"]["options"]["baseURL"]
             .as_str()
             .is_some_and(|url| url.ends_with("/openrouter/v1"))
+    );
+    Ok(())
+}
+
+#[test]
+fn guarded_agent_modes_redact_requests_and_responses_to_fake_providers()
+-> Result<(), Box<dyn Error>> {
+    for mode in ["claude", "codex", "opencode"] {
+        run_guarded_fake_provider_mode(mode)?;
+    }
+    Ok(())
+}
+
+fn run_guarded_fake_provider_mode(mode: &str) -> Result<(), Box<dyn Error>> {
+    let directory = TestDirectory::new()?;
+    let provider = spawn_fake_provider(mode)?;
+    let agent = fake_provider_agent(directory.path(), mode)?;
+    let agent_path = agent.to_str().ok_or("non-UTF-8 agent path")?;
+    let output = match mode {
+        "claude" => Command::new(env!("CARGO_BIN_EXE_blindfold"))
+            .args([
+                "run",
+                "--guard",
+                "claude",
+                "--anthropic-upstream",
+                &provider.upstream,
+                "--agent-command",
+                agent_path,
+            ])
+            .current_dir(directory.path())
+            .output()?,
+        "codex" => Command::new(env!("CARGO_BIN_EXE_blindfold"))
+            .args([
+                "run",
+                "--guard",
+                "codex",
+                "--openai-upstream",
+                &provider.upstream,
+                "--agent-command",
+                agent_path,
+                "--",
+                "exec",
+                "hello",
+            ])
+            .current_dir(directory.path())
+            .output()?,
+        "opencode" => Command::new(env!("CARGO_BIN_EXE_blindfold"))
+            .args([
+                "run",
+                "--guard",
+                "opencode",
+                "--openai-upstream",
+                &provider.upstream,
+                "--agent-command",
+                agent_path,
+                "--",
+                "run",
+                "hello",
+            ])
+            .current_dir(directory.path())
+            .output()?,
+        _ => unreachable!("fixed test modes"),
+    };
+
+    assert!(output.status.success(), "{mode}: {}", stderr(&output));
+    let request = provider
+        .request
+        .recv_timeout(Duration::from_secs(5))
+        .map_err(|error| {
+            let agent_response =
+                fs::read_to_string(directory.path().join("agent-response")).unwrap_or_default();
+            format!(
+                "{mode}: fake provider did not receive request: {error}; stdout={}; stderr={}; agent_response={agent_response}",
+                stdout(&output),
+                stderr(&output)
+            )
+        })?;
+    provider
+        .done
+        .join()
+        .map_err(|_| "provider thread panicked")?;
+    assert!(
+        request.request_line.contains("/v1/"),
+        "{mode}: unexpected upstream request line {}",
+        request.request_line
+    );
+    assert!(
+        !request.request_line.contains("/v1/v1/"),
+        "{mode}: duplicate upstream version path {}",
+        request.request_line
+    );
+    assert!(
+        !request.body.contains(PROVIDER_FIXTURE),
+        "{mode}: upstream body leaked raw fixture: {}",
+        request.body
+    );
+    assert!(
+        request.body.contains("[REDACTED:openai_api_key]"),
+        "{mode}: upstream body was not redacted: {}",
+        request.body
+    );
+    let response = fs::read_to_string(directory.path().join("agent-response"))?;
+    assert!(
+        !response.contains(PROVIDER_FIXTURE),
+        "{mode}: agent response leaked raw fixture: {response}"
+    );
+    assert!(
+        response.contains("[REDACTED:openai_api_key]"),
+        "{mode}: agent response was not redacted: {response}"
+    );
+    assert!(
+        !stdout(&output).contains(PROVIDER_FIXTURE),
+        "{mode}: stdout leaked raw fixture"
     );
     Ok(())
 }

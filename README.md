@@ -219,7 +219,7 @@ Run a loopback proxy with an explicit upstream allowlist:
 ```sh
 blindfold proxy \
   --listen 127.0.0.1:8787 \
-  --openai-upstream https://api.openai.com/v1 \
+  --openai-upstream https://api.openai.com \
   --anthropic-upstream https://api.anthropic.com
 ```
 

@@ -17,8 +17,8 @@ Arguments after `--` are passed to the native agent unchanged.
 The default upstreams are:
 
 - Claude and OpenCode Anthropic: `https://api.anthropic.com`
-- Codex and OpenCode OpenAI: `https://api.openai.com/v1`
-- OpenCode OpenRouter: `https://openrouter.ai/api/v1`
+- Codex and OpenCode OpenAI: `https://api.openai.com`
+- OpenCode OpenRouter: `https://openrouter.ai/api`
 
 Override them only when using a compatible gateway:
 
@@ -28,11 +28,11 @@ blindfold run --guard claude \
   -- --model sonnet
 
 blindfold run --guard codex \
-  --openai-upstream https://gateway.example/openai/v1 \
+  --openai-upstream https://gateway.example/openai \
   -- review
 
 blindfold run --guard opencode \
-  --openrouter-upstream https://openrouter.ai/api/v1 \
+  --openrouter-upstream https://openrouter.ai/api \
   -- run "inspect this project"
 ```
 
