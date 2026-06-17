@@ -1626,12 +1626,12 @@ boundary in the first screenful.
   completeness; corpus thresholds remain.
 - [x] `blindfold redact .env` produces useful key-preserving output.
 - [x] Piped stdin can be redacted.
-- [ ] `blindfold proxy` sanitizes OpenAI-compatible and Anthropic-compatible requests
+- [x] `blindfold proxy` sanitizes OpenAI-compatible and Anthropic-compatible requests
   and responses.
 - [x] OpenRouter/OpenAI-compatible routed traffic is sanitized when configured for
   OpenCode.
-- [ ] Streaming sanitization catches a secret across every tested chunk boundary.
-- [ ] `blindfold exec --secret NAME -- COMMAND` injects only approved values.
+- [x] Streaming sanitization catches a secret across every tested chunk boundary.
+- [x] `blindfold exec --secret NAME -- COMMAND` injects only approved values.
 - [x] Command stdout/stderr is sanitized while exit behavior is preserved.
 - [~] `blindfold run --guard opencode|claude|codex` completes the documented
   fake-provider demo without raw secrets reaching the fake provider for Claude, Codex
