@@ -6,7 +6,7 @@ This is the short guide. You do not need to learn every Blindfold command.
 
 | I want to... | Command |
 | --- | --- |
-| Start Codex with Blindfold Guard | `blindfold run --guard codex` |
+| Start Codex with Blindfold Guard | `blindfold run --guard codex -- exec "summarize this repo"` |
 | Start Claude with Blindfold Guard | `blindfold run --guard claude` |
 | Start OpenCode with Blindfold Guard | `blindfold run --guard opencode` |
 | Trace a command or agent session | `bf redact .env --trace` |
@@ -41,24 +41,27 @@ validates it, but most runtime commands currently use CLI defaults and flags. Do
 
 ## Use Case 1: Run Codex Now
 
-Start an interactive Codex session:
+Run Codex non-interactively through Guard:
 
 ```sh
-blindfold run --guard codex
+blindfold run --guard codex -- exec "summarize this repo"
 ```
 
 Pass normal Codex arguments after `--`:
 
 ```sh
+blindfold run --guard codex -- exec "explain this repository"
 blindfold run --guard codex -- review
-blindfold run --guard codex -- "explain this repository"
-blindfold run --guard codex -- --sandbox workspace-write
+blindfold run --guard codex -- exec --sandbox workspace-write "find the risky files"
 ```
 
 Blindfold starts a temporary local proxy, launches Codex, and stops the proxy when
 Codex exits. Guard mode also sets proxy environment variables so proxy-aware clients
 cannot tunnel directly to known LLM providers. It does not permanently edit Codex
 configuration.
+
+Interactive Codex currently uses a WebSocket transport that Blindfold does not sanitize
+yet, so `blindfold run --guard codex` without `exec` or `review` fails closed.
 
 Guard mode allows common development services such as GitHub, npm, PyPI, crates.io,
 and Go module mirrors. Unknown domains are blocked by default. If your project needs a
@@ -104,7 +107,7 @@ bf redact .env --trace
 Trace a Codex session and its managed provider requests:
 
 ```sh
-bf run --guard codex --trace
+bf run --guard codex --trace -- exec "summarize this repo"
 ```
 
 Traced agent runs do not redact direct file reads. If the agent opens `.env` from the

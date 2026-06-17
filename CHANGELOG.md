@@ -45,6 +45,8 @@ project follows Semantic Versioning as described in
 
 ### Fixed
 
+- Interactive Codex guard runs now fail closed with an explicit WebSocket transport
+  limitation instead of launching an unsupported proxy path.
 - Traced agent sessions now explicitly report unmediated direct filesystem access
   instead of implying the whole session is protected.
 - Managed coding-agent wrappers no longer inherit the parent secret environment.

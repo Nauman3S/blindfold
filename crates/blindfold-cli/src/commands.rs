@@ -1819,6 +1819,11 @@ async fn run_agent_command(root: &Path, args: &ArgMatches, trace_enabled: bool) 
             "Codex arguments override the managed OpenAI base URL; remove that override or use --no-proxy",
         );
     }
+    if agent == "codex" && codex_uses_interactive_websocket_transport(&agent_args) {
+        return fail(
+            "interactive Codex uses a WebSocket transport that Blindfold does not sanitize yet; use `blindfold run --guard codex -- exec ...`, `blindfold run --guard codex -- review`, or `--no-proxy`",
+        );
+    }
 
     let listen: SocketAddr = match "127.0.0.1:0".parse() {
         Ok(address) => address,
@@ -2063,6 +2068,13 @@ fn codex_overrides_proxy(args: &[String]) -> bool {
     }) || args
         .iter()
         .any(|arg| arg.starts_with("--config=openai_base_url"))
+}
+
+fn codex_uses_interactive_websocket_transport(args: &[String]) -> bool {
+    !matches!(
+        args.first().map(String::as_str),
+        Some("exec" | "e" | "review")
+    )
 }
 
 async fn run_native_agent(agent: &str, command: &str, args: &[String]) -> ExitCode {

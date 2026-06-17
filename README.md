@@ -251,6 +251,7 @@ go after `--`:
 
 ```sh
 blindfold run --guard claude -- --model sonnet
+blindfold run --guard codex -- exec "summarize this repo"
 blindfold run --guard codex -- review
 blindfold run --guard opencode -- run "inspect this project"
 ```
@@ -270,6 +271,10 @@ blindfold allow domain api.example.com
 blindfold status
 blindfold deny domain api.example.com
 ```
+
+Interactive Codex currently uses a WebSocket transport that Blindfold does not sanitize
+yet. Guarded Codex usage is limited to non-interactive `exec` and `review` until that
+transport is implemented.
 
 Keep typing the native command names by activating shell wrappers:
 

@@ -230,6 +230,7 @@ fn traced_agent_session_reports_unmediated_file_reads() -> Result<(), Box<dyn Er
             "--agent-command",
             agent.to_str().ok_or("non-UTF-8 agent path")?,
             "--",
+            "exec",
             "--version",
         ])
         .current_dir(directory.path())
@@ -722,6 +723,27 @@ fn codex_wrapper_injects_one_run_base_url_override() -> Result<(), Box<dyn Error
 }
 
 #[test]
+fn interactive_codex_guard_refuses_unsupported_websocket_transport() -> Result<(), Box<dyn Error>> {
+    let directory = TestDirectory::new()?;
+    let agent = fake_agent(directory.path())?;
+    let output = blindfold(
+        directory.path(),
+        &[
+            "run",
+            "--guard",
+            "codex",
+            "--agent-command",
+            agent.to_str().ok_or("non-UTF-8 agent path")?,
+        ],
+    )?;
+
+    assert!(!output.status.success());
+    assert!(stderr(&output).contains("WebSocket transport"));
+    assert!(!directory.path().join("agent-args").exists());
+    Ok(())
+}
+
+#[test]
 fn opencode_wrapper_merges_inline_config_and_routes_both_providers() -> Result<(), Box<dyn Error>> {
     let directory = TestDirectory::new()?;
     let agent = fake_agent(directory.path())?;
@@ -804,6 +826,7 @@ fn managed_wrapper_does_not_inherit_parent_secrets() -> Result<(), Box<dyn Error
             "--agent-command",
             agent.to_str().ok_or("non-UTF-8 agent path")?,
             "--",
+            "exec",
             "--version",
         ])
         .env("BLINDFOLD_MASTER_KEY", "11".repeat(32))

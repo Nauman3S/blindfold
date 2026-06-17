@@ -7,6 +7,7 @@ application proxy. It does not modify the agents' persistent configuration.
 
 ```sh
 blindfold run --guard claude -- --version
+blindfold run --guard codex -- exec "summarize this repo"
 blindfold run --guard codex -- review
 blindfold run --guard opencode -- run "inspect this project"
 ```
@@ -78,7 +79,10 @@ It does not change persistent configuration.
 ## Agent Integration
 
 - Claude receives an ephemeral `ANTHROPIC_BASE_URL`.
-- Codex receives an ephemeral `openai_base_url` CLI configuration override.
+- Codex receives an ephemeral `openai_base_url` CLI configuration override for
+  non-interactive `exec` and `review` runs. Interactive Codex currently uses a
+  WebSocket transport that Blindfold does not sanitize yet, so Guard fails closed for
+  that mode.
 - OpenCode receives an `OPENCODE_CONFIG_CONTENT` overlay for its OpenAI and Anthropic
   provider base URLs (`/openai/v1`, `/anthropic/v1`, and `/openrouter/v1`). Existing
   inline settings are retained.
