@@ -260,7 +260,9 @@ No persistent Claude, Codex, or OpenCode configuration is changed. Managed wrapp
 start the agent with an allowlisted environment, so parent API-key variables and
 unrelated secrets are not inherited. Authenticate the agent with its persistent
 credential store or login flow; environment-only provider authentication is not
-available in managed mode.
+available in managed mode. Non-interactive `codex exec`, `codex review`, and
+`opencode run` child stdout/stderr are captured and redacted before Blindfold prints
+them; interactive terminal output is not sanitized.
 
 Guard mode also sets proxy variables for the child process. Direct tunnels to known LLM
 providers are blocked, common development registries are allowed, and unknown domains

@@ -1314,7 +1314,9 @@ protection boundary.
 - [x] `P6-03B` Configure OpenRouter/OpenAI-compatible routing for OpenCode through
   Blindfold's local proxy.
 - [x] `P6-03C` Start and configure the egress guard for guard-mode agent runs.
-- [!] `P6-04` Sanitize wrapper-managed stdout/stderr.
+- [~] `P6-04` Sanitize wrapper-managed stdout/stderr. Non-interactive `codex exec`,
+  `codex review`, and `opencode run` now capture and redact child stdout/stderr while
+  preserving exit code; interactive passthrough output remains unsanitized.
 - [!] `P6-05` Protect supported file/tool reads through documented hooks or broker
   integration only in strict/future modes; do not claim guard-mode local file-read
   interception.
@@ -1630,7 +1632,7 @@ boundary in the first screenful.
   OpenCode.
 - [ ] Streaming sanitization catches a secret across every tested chunk boundary.
 - [ ] `blindfold exec --secret NAME -- COMMAND` injects only approved values.
-- [ ] Command stdout/stderr is sanitized while exit behavior is preserved.
+- [x] Command stdout/stderr is sanitized while exit behavior is preserved.
 - [~] `blindfold run --guard opencode|claude|codex` completes the documented
   fake-provider demo without raw secrets reaching the fake provider for Claude, Codex
   `exec`, and OpenCode `run`; remaining documented variants still need coverage.

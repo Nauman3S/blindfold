@@ -109,6 +109,22 @@ socket.close
     Ok(path)
 }
 
+fn fake_leaky_agent(directory: &Path) -> Result<PathBuf, std::io::Error> {
+    let path = directory.join("fake-leaky-agent");
+    let script = format!(
+        r"#!/bin/sh
+printf '%s\n' 'stdout {PROVIDER_FIXTURE}'
+printf '%s\n' 'stderr {PROVIDER_FIXTURE}' >&2
+exit 7
+"
+    );
+    fs::write(&path, script)?;
+    let mut permissions = fs::metadata(&path)?.permissions();
+    permissions.set_mode(0o700);
+    fs::set_permissions(&path, permissions)?;
+    Ok(path)
+}
+
 fn fake_provider_agent(directory: &Path, mode: &str) -> Result<PathBuf, std::io::Error> {
     let path = directory.join(format!("fake-provider-agent-{mode}"));
     let script = format!(
@@ -983,6 +999,32 @@ fn opencode_wrapper_merges_inline_config_and_routes_both_providers() -> Result<(
             .as_str()
             .is_some_and(|url| url.ends_with("/openrouter/v1"))
     );
+    Ok(())
+}
+
+#[test]
+fn managed_noninteractive_agent_output_is_sanitized() -> Result<(), Box<dyn Error>> {
+    let directory = TestDirectory::new()?;
+    let agent = fake_leaky_agent(directory.path())?;
+    let output = Command::new(env!("CARGO_BIN_EXE_blindfold"))
+        .args([
+            "run",
+            "--guard",
+            "codex",
+            "--agent-command",
+            agent.to_str().ok_or("non-UTF-8 agent path")?,
+            "--",
+            "exec",
+            "hello",
+        ])
+        .current_dir(directory.path())
+        .output()?;
+
+    assert_eq!(output.status.code(), Some(7));
+    assert!(!stdout(&output).contains(PROVIDER_FIXTURE));
+    assert!(!stderr(&output).contains(PROVIDER_FIXTURE));
+    assert!(stdout(&output).contains("[REDACTED:openai_api_key]"));
+    assert!(stderr(&output).contains("[REDACTED:openai_api_key]"));
     Ok(())
 }
 

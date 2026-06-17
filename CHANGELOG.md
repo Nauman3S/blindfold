@@ -36,6 +36,8 @@ project follows Semantic Versioning as described in
   and OpenCode `run` requests and responses.
 - Agent/provider compatibility matrix documenting proven, pending, and fail-closed
   guarded wrapper modes.
+- Captured stdout/stderr redaction for non-interactive guarded `codex exec`,
+  `codex review`, and `opencode run` child processes.
 - Secret detectors, redaction modes, bounded repository scanning, and safe reports.
 - Destination-aware policy presets and scoped restoration decisions.
 - XChaCha20-Poly1305 local vault with safe audit metadata.
@@ -58,6 +60,8 @@ project follows Semantic Versioning as described in
   limitation instead of launching an unsupported proxy path.
 - OpenAI and OpenRouter upstream defaults now use route roots, avoiding duplicate
   `/v1/v1` provider paths when the local proxy forwards agent requests.
+- Non-interactive guarded wrapper output now preserves the child exit code while
+  redacting detected secrets from captured stdout/stderr.
 - Proxy upgrade/WebSocket requests now fail closed with a safe `unsupported_transport`
   error before any request body is forwarded.
 - Traced agent sessions now explicitly report unmediated direct filesystem access

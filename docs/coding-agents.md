@@ -111,6 +111,11 @@ variables or unrelated secrets. Authentication must use the agent's persistent
 credential store or login flow. Environment-only provider authentication requires a
 visible `--no-proxy` bypass until a credential broker is implemented.
 
+For non-interactive `codex exec`, `codex review`, and `opencode run`, Blindfold captures
+child stdout/stderr, redacts detected secrets, then prints the sanitized output while
+preserving the child exit code. Interactive passthrough modes are not captured, so their
+terminal output is not sanitized.
+
 ## Guard Egress Policy
 
 Guard mode sets `HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY`, and `NO_PROXY` for the child
@@ -132,11 +137,11 @@ CA in v1 and does not inspect arbitrary encrypted HTTPS payloads.
 ## Current Boundary
 
 The wrappers sanitize supported provider JSON and SSE request/response fields. Guard
-mode also sets proxy environment variables and blocks direct known-provider CONNECT
-tunnels for proxy-aware clients. They do not currently sanitize interactive terminal
-output, broker provider credentials, mediate direct filesystem access, or control
-network clients that ignore proxy settings. `--strict` therefore refuses to start
-instead of claiming full workspace controls exist.
+mode also sets proxy environment variables, sanitizes captured non-interactive child
+stdout/stderr, and blocks direct known-provider CONNECT tunnels for proxy-aware clients.
+They do not currently sanitize interactive terminal output, broker provider credentials,
+mediate direct filesystem access, or control network clients that ignore proxy settings.
+`--strict` therefore refuses to start instead of claiming full workspace controls exist.
 
 Agent file reads are not mediated. If an agent opens `.env`, `.env.local`, or any other
 project file directly, it reads the file from disk exactly as stored. Use `blindfold

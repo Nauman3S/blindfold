@@ -4,7 +4,7 @@ use std::fs;
 use std::io::{self, BufRead, Read, Write};
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
-use std::process::ExitCode;
+use std::process::{ExitCode, Stdio};
 use std::sync::{
     Arc, Mutex,
     atomic::{AtomicU64, Ordering},
@@ -48,6 +48,8 @@ use crate::{config, doctor};
 
 const MASTER_KEY_ENV: &str = "BLINDFOLD_MASTER_KEY";
 const BYPASS_ENV: &str = "BLINDFOLD_BYPASS";
+const MANAGED_AGENT_OUTPUT_LIMIT: usize = 4 * 1024 * 1024;
+const MANAGED_AGENT_OUTPUT_TRUNCATION_OVERLAP: usize = 512;
 const DEFAULT_ALLOWED_DOMAINS: &[&str] = &[
     "github.com",
     "api.github.com",
@@ -1860,9 +1862,17 @@ async fn run_agent_command(root: &Path, args: &ArgMatches, trace_enabled: bool) 
     } else {
         "Blindfold degraded compatibility mode:"
     };
+    let sanitize_child_output = sanitizes_managed_agent_output(agent, &agent_args);
     eprintln!("{mode}");
     eprintln!("- managed provider request/response proxy: available");
-    eprintln!("- interactive terminal output sanitization: unavailable");
+    eprintln!(
+        "- child stdout/stderr sanitization: {}",
+        if sanitize_child_output {
+            "enabled for this non-interactive mode"
+        } else {
+            "unavailable for interactive passthrough"
+        }
+    );
     eprintln!("- direct filesystem/network bypass prevention: unavailable");
     eprintln!(
         "- direct known-provider egress blocking: {}",
@@ -1926,7 +1936,7 @@ async fn run_agent_command(root: &Path, args: &ArgMatches, trace_enabled: bool) 
             upstreams,
             ..ProxyConfig::default()
         },
-        sanitizer,
+        Arc::clone(&sanitizer) as Arc<dyn ProxySanitizer>,
     ) {
         Ok(proxy) => proxy,
         Err(error) => return fail(&error.to_string()),
@@ -1992,7 +2002,11 @@ async fn run_agent_command(root: &Path, args: &ArgMatches, trace_enabled: bool) 
         command.env("ALL_PROXY", origin);
         command.env("NO_PROXY", "localhost,127.0.0.1,::1");
     }
-    let status = command.status().await;
+    let status = if sanitize_child_output {
+        run_managed_agent_with_sanitized_output(&mut command, &sanitizer).await
+    } else {
+        command.status().await
+    };
     cancellation.cancel();
     let _ = proxy_task.await;
     if let Some(task) = egress_task {
@@ -2013,6 +2027,89 @@ async fn run_agent_command(root: &Path, args: &ArgMatches, trace_enabled: bool) 
     match status {
         Ok(status) => exit_from_code(status.code()),
         Err(error) => fail(&format!("could not run agent: {}", error.kind())),
+    }
+}
+
+async fn run_managed_agent_with_sanitized_output(
+    command: &mut tokio::process::Command,
+    sanitizer: &DetectorSanitizer,
+) -> io::Result<std::process::ExitStatus> {
+    command.stdout(Stdio::piped()).stderr(Stdio::piped());
+    let mut child = command.spawn()?;
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| io::Error::other("child stdout was not captured"))?;
+    let stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| io::Error::other("child stderr was not captured"))?;
+    let stdout_task = tokio::spawn(read_bounded_agent_output(stdout));
+    let stderr_task = tokio::spawn(read_bounded_agent_output(stderr));
+    let status = child.wait().await?;
+    let stdout = join_agent_output(stdout_task).await?;
+    let stderr = join_agent_output(stderr_task).await?;
+    write_sanitized_agent_output(io::stdout().lock(), stdout, sanitizer)?;
+    write_sanitized_agent_output(io::stderr().lock(), stderr, sanitizer)?;
+    Ok(status)
+}
+
+struct AgentOutput {
+    bytes: Vec<u8>,
+    truncated: bool,
+}
+
+async fn read_bounded_agent_output<R>(reader: R) -> io::Result<AgentOutput>
+where
+    R: tokio::io::AsyncRead + Unpin,
+{
+    let mut buffer = Vec::new();
+    let limit = MANAGED_AGENT_OUTPUT_LIMIT.saturating_add(1);
+    reader.take(limit as u64).read_to_end(&mut buffer).await?;
+    let truncated = buffer.len() > MANAGED_AGENT_OUTPUT_LIMIT;
+    if truncated {
+        buffer.truncate(MANAGED_AGENT_OUTPUT_LIMIT);
+    }
+    Ok(AgentOutput {
+        bytes: buffer,
+        truncated,
+    })
+}
+
+async fn join_agent_output(
+    task: tokio::task::JoinHandle<io::Result<AgentOutput>>,
+) -> io::Result<AgentOutput> {
+    task.await
+        .map_err(|_| io::Error::other("child output reader failed"))?
+}
+
+fn write_sanitized_agent_output<W: Write>(
+    mut writer: W,
+    output: AgentOutput,
+    sanitizer: &DetectorSanitizer,
+) -> io::Result<()> {
+    let mut bytes = output.bytes;
+    if output.truncated {
+        let printable = bytes
+            .len()
+            .saturating_sub(MANAGED_AGENT_OUTPUT_TRUNCATION_OVERLAP);
+        bytes.truncate(printable);
+    }
+    let text = String::from_utf8_lossy(&bytes);
+    writer.write_all(sanitizer.sanitize_text(&text).as_bytes())?;
+    if output.truncated {
+        writer.write_all(
+            b"\n[BLINDFOLD: child output exceeded capture limit; tail omitted before redaction]\n",
+        )?;
+    }
+    Ok(())
+}
+
+fn sanitizes_managed_agent_output(agent: &str, args: &[String]) -> bool {
+    match agent {
+        "codex" => !codex_uses_interactive_websocket_transport(args),
+        "opencode" => matches!(args.first().map(String::as_str), Some("run")),
+        _ => false,
     }
 }
 
