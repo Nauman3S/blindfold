@@ -33,9 +33,10 @@ The following remain unprotected unless the wrapper can explicitly mediate them:
 
 The managed child uses an environment allowlist and does not inherit parent API-key
 variables or unrelated secrets. The current preview does not sanitize the interactive
-terminal stream, install file/tool hooks, broker provider credentials, or prevent direct
-network/filesystem bypasses. Authenticate through Claude's persistent login or
-credential store; environment-only authentication requires a visible bypass.
+terminal stream, install file/tool hooks, broker provider credentials into Claude, or
+prevent direct network/filesystem bypasses. Authenticate through Claude's persistent
+login or credential store; environment-only provider authentication requires a visible
+bypass. Use `blindfold exec` or `blindfold call` for separate scoped secret use.
 
 `--strict` refuses to start because these controls cannot yet establish the documented
 MVP boundary. It does not create an OS sandbox or network firewall.

@@ -50,6 +50,7 @@ const MASTER_KEY_ENV: &str = "BLINDFOLD_MASTER_KEY";
 const BYPASS_ENV: &str = "BLINDFOLD_BYPASS";
 const MANAGED_AGENT_OUTPUT_LIMIT: usize = 4 * 1024 * 1024;
 const MANAGED_AGENT_OUTPUT_TRUNCATION_OVERLAP: usize = 512;
+const CALL_RESPONSE_LIMIT: usize = 1024 * 1024;
 const DEFAULT_ALLOWED_DOMAINS: &[&str] = &[
     "github.com",
     "api.github.com",
@@ -87,6 +88,9 @@ pub(crate) async fn run() -> ExitCode {
         Some(("exec", args)) => traced_command(&root, trace_enabled, TraceRoute::Exec, || {
             exec_command(args)
         }),
+        Some(("call", args)) => {
+            traced_async_command(&root, trace_enabled, TraceRoute::Call, call_command(args)).await
+        }
         Some(("policy", args)) => traced_command(&root, trace_enabled, TraceRoute::Policy, || {
             policy_command(args)
         }),
@@ -195,6 +199,23 @@ fn cli() -> Command {
                         .num_args(1..)
                         .trailing_var_arg(true)
                         .required(true),
+                ),
+        )
+        .subcommand(
+            Command::new("call")
+                .about("Make one brokered HTTP call with an explicit bearer secret")
+                .arg(Arg::new("url").long("url").required(true))
+                .arg(Arg::new("secret").long("secret").required(true))
+                .arg(
+                    Arg::new("method")
+                        .long("method")
+                        .default_value("GET")
+                        .value_parser(["GET", "POST"]),
+                )
+                .arg(
+                    Arg::new("body")
+                        .long("body")
+                        .help("Optional non-secret request body"),
                 ),
         )
         .subcommand(
@@ -805,6 +826,105 @@ fn exec_command(args: &ArgMatches) -> ExitCode {
     }
 }
 
+async fn call_command(args: &ArgMatches) -> ExitCode {
+    let Some(secret_name) = args.get_one::<String>("secret") else {
+        return fail("a secret name is required");
+    };
+    let env_name = match EnvironmentName::new(secret_name.clone()) {
+        Ok(name) => name,
+        Err(error) => return fail(&error.to_string()),
+    };
+    let Ok(secret) = env::var(secret_name) else {
+        return fail("a requested secret is unavailable in the parent environment");
+    };
+    if secret.is_empty() {
+        return fail("a requested secret is empty");
+    }
+    let Some(url_text) = args.get_one::<String>("url") else {
+        return fail("a URL is required");
+    };
+    let Ok(url) = reqwest::Url::parse(url_text) else {
+        return fail("invalid URL");
+    };
+    if !matches!(url.scheme(), "http" | "https") {
+        return fail("unsupported URL scheme");
+    }
+    let method = match args.get_one::<String>("method").map(String::as_str) {
+        Some("POST") => reqwest::Method::POST,
+        _ => reqwest::Method::GET,
+    };
+    let Ok(auth_value) = reqwest::header::HeaderValue::from_str(&format!("Bearer {secret}")) else {
+        return fail("secret cannot be represented as an HTTP bearer token");
+    };
+    let Ok(client) = reqwest::Client::builder()
+        .no_proxy()
+        .redirect(reqwest::redirect::Policy::none())
+        .timeout(Duration::from_secs(30))
+        .build()
+    else {
+        return fail("could not initialize HTTP client");
+    };
+    let mut request = client
+        .request(method, url)
+        .header(reqwest::header::AUTHORIZATION, auth_value);
+    if let Some(body) = args.get_one::<String>("body") {
+        request = request
+            .header(reqwest::header::CONTENT_TYPE, "application/json")
+            .body(body.clone());
+    }
+    let Ok(response) = request.send().await else {
+        return fail("brokered HTTP call failed");
+    };
+    let status = response.status();
+    let body = match read_bounded_response(response).await {
+        Ok(body) => body,
+        Err(message) => return fail(message),
+    };
+    let sanitizer = match DetectorSanitizer::new() {
+        Ok(sanitizer) => sanitizer,
+        Err(code) => return code,
+    };
+    let output = String::from_utf8_lossy(&body);
+    let exact_redacted = output.replace(&secret, &format!("[REDACTED:{}]", env_name.as_str()));
+    let safe_output = sanitizer.sanitize_text(&exact_redacted);
+    println!("status: {}", status.as_u16());
+    print!("{safe_output}");
+    if !safe_output.ends_with('\n') {
+        println!();
+    }
+    eprintln!(
+        "Blindfold: injected_secret={} response_bytes={} raw_secrets_exposed=0",
+        env_name.as_str(),
+        body.len()
+    );
+    if status.is_success() {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::FAILURE
+    }
+}
+
+async fn read_bounded_response(mut response: reqwest::Response) -> Result<Vec<u8>, &'static str> {
+    if response
+        .content_length()
+        .is_some_and(|length| length > CALL_RESPONSE_LIMIT as u64)
+    {
+        return Err("brokered HTTP response is too large");
+    }
+    let mut body = Vec::new();
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .map_err(|_| "could not read brokered HTTP response")?
+    {
+        if body.len().saturating_add(chunk.len()) > CALL_RESPONSE_LIMIT {
+            return Err("brokered HTTP response is too large");
+        }
+        body.extend_from_slice(&chunk);
+    }
+    Ok(body)
+}
+
 fn policy_command(args: &ArgMatches) -> ExitCode {
     let Some(("check", check)) = args.subcommand() else {
         return fail("policy subcommand is required");
@@ -1306,6 +1426,7 @@ const fn trace_route_label(route: TraceRoute) -> &'static str {
         TraceRoute::Redact => "redact",
         TraceRoute::Scan => "scan",
         TraceRoute::Exec => "exec",
+        TraceRoute::Call => "call",
         TraceRoute::Policy => "policy",
         TraceRoute::DiffCheck => "diff-check",
         TraceRoute::Vault => "vault",

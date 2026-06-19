@@ -1286,6 +1286,10 @@ output to the caller.
   secret intentionally provided to it.
 - [x] `P5-12` Test child crashes, signals, timeouts, binary output, large output, and
   output containing all injected values.
+- [~] `P5-13` Implement `blindfold call --secret NAME --url URL` for one brokered
+  bearer-token HTTP request with bounded redacted response output and payload-free
+  tracing. Current support is environment-backed bearer tokens only; vault-backed
+  secrets, arbitrary header/body placement, and per-domain policy are not integrated.
 
 **Exit criteria:**
 
@@ -1739,7 +1743,7 @@ Track these explicitly; unresolved high-impact decisions block the affected phas
 | `R-05` | Risk | Detector false positives make the default workflow unusable | P1 | Open |
 | `R-06` | Risk | Dependencies log or serialize sensitive payloads unexpectedly | P0-P7 | Open |
 | `R-07` | Risk | Automatic PII discovery is absent while older design examples imply it exists | P1/P10 | Open: claims narrowed; scope decision required |
-| `R-08` | Risk | Managed agents using environment-only provider credentials cannot authenticate without bypass | P6 | Open: implement a credential broker |
+| `R-08` | Risk | Managed agents using environment-only provider credentials cannot authenticate without bypass | P6 | Open: `blindfold exec` and `blindfold call` cover scoped secret use, but provider credentials are not brokered into managed agent login |
 
 For each open item, add an owner, target date, decision link, and mitigation when the
 project moves into active implementation.

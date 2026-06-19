@@ -17,7 +17,8 @@ commands without requiring you to understand the full architecture.
 This repository is pre-release software:
 
 - **Implemented:** scanning, redaction, policy evaluation, encrypted local vault,
-  sanitized command execution, OpenAI/Anthropic application proxy, diff scanning.
+  sanitized command execution, one-shot brokered HTTP calls, OpenAI/Anthropic
+  application proxy, diff scanning.
 - **Preview:** Claude, Codex, and OpenCode wrappers; MCP stdio transformer; TypeScript
   SDK.
 - **Not implemented:** OS keychain adapter, transparent network interception, filesystem
@@ -150,6 +151,21 @@ Blindfold:
 
 This is not a process sandbox. A hostile child can transform or exfiltrate a secret it
 was explicitly given.
+
+## Make One API Call with a Secret
+
+Use `blindfold call` when an agent or script needs one bearer-token HTTP request but
+should not see the token in output:
+
+```sh
+export STRIPE_SECRET_KEY='sk_test_fake_blindfold_example_1234567890'
+blindfold call --secret STRIPE_SECRET_KEY --url https://api.stripe.com/v1/customers
+```
+
+Blindfold reads the named environment variable, sends it only as
+`Authorization: Bearer ...`, bounds the response body, redacts the selected value from
+the response, and records only payload-free trace metadata when `--trace` is enabled.
+This is a narrow broker, not a general HTTP client or transparent network proxy.
 
 ## Check Policy Behavior
 

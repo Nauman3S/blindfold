@@ -53,6 +53,8 @@ pub enum Route {
     Scan,
     /// A local explicit-secret execution operation.
     Exec,
+    /// A brokered explicit-secret HTTP call operation.
+    Call,
     /// A policy inspection operation.
     Policy,
     /// A generated-diff inspection operation.

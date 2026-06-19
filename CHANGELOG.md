@@ -48,6 +48,8 @@ project follows Semantic Versioning as described in
 - Destination-aware policy presets and scoped restoration decisions.
 - XChaCha20-Poly1305 local vault with safe audit metadata.
 - Sanitized explicit-secret process execution.
+- Minimal `blindfold call` broker for one bearer-token HTTP request with bounded,
+  redacted response output and payload-free tracing.
 - Loopback OpenAI-compatible and Anthropic-compatible application proxy.
 - Unified-diff secret scanning.
 - MCP stdio JSON-RPC protection preview.

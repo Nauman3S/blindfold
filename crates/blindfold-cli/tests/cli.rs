@@ -177,6 +177,7 @@ struct FakeProvider {
 #[derive(Debug)]
 struct CapturedProviderRequest {
     request_line: String,
+    header: String,
     body: String,
 }
 
@@ -206,6 +207,32 @@ fn spawn_fake_provider(mode: &str) -> Result<FakeProvider, Box<dyn Error>> {
             "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
             response.len(),
             response
+        );
+        let _ = stream.write_all(reply.as_bytes());
+    });
+    Ok(FakeProvider {
+        upstream,
+        request: rx,
+        done,
+    })
+}
+
+fn spawn_fake_call_server(response_body: String) -> Result<FakeProvider, Box<dyn Error>> {
+    let listener = TcpListener::bind("127.0.0.1:0")?;
+    let upstream = format!("http://{}", listener.local_addr()?);
+    let (tx, rx) = mpsc::channel();
+    let done = thread::spawn(move || {
+        let Ok((mut stream, _)) = listener.accept() else {
+            return;
+        };
+        let Ok(request) = read_provider_request(&mut stream) else {
+            return;
+        };
+        let _ = tx.send(request);
+        let reply = format!(
+            "HTTP/1.1 200 OK\r\ncontent-type: text/plain\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+            response_body.len(),
+            response_body
         );
         let _ = stream.write_all(reply.as_bytes());
     });
@@ -251,7 +278,11 @@ fn read_provider_request(
                 &buffer[body_start..body_start.saturating_add(content_length)],
             )
             .into_owned();
-            return Ok(CapturedProviderRequest { request_line, body });
+            return Ok(CapturedProviderRequest {
+                request_line,
+                header,
+                body,
+            });
         }
     }
     Err("provider request was incomplete".into())
@@ -710,6 +741,56 @@ fn exec_injects_then_redacts_selected_secret() -> Result<(), Box<dyn Error>> {
     assert!(output.status.success());
     assert!(!combined.contains(raw));
     assert!(combined.contains("[REDACTED]"));
+    Ok(())
+}
+
+#[test]
+fn call_injects_bearer_secret_and_redacts_response() -> Result<(), Box<dyn Error>> {
+    let directory = TestDirectory::new()?;
+    let server = spawn_fake_call_server(format!("token={PROVIDER_FIXTURE}"))?;
+    let output = Command::new(env!("CARGO_BIN_EXE_blindfold"))
+        .args([
+            "call",
+            "--trace",
+            "--secret",
+            "BLINDFOLD_CALL_TOKEN",
+            "--url",
+            &server.upstream,
+        ])
+        .env("BLINDFOLD_CALL_TOKEN", PROVIDER_FIXTURE)
+        .current_dir(directory.path())
+        .output()?;
+
+    assert!(output.status.success(), "{}", stderr(&output));
+    let request = server.request.recv_timeout(Duration::from_secs(5))?;
+    server.done.join().map_err(|_| "server thread panicked")?;
+    assert!(
+        request.request_line.starts_with("GET / HTTP/1.1"),
+        "unexpected request line: {}",
+        request.request_line
+    );
+    assert!(
+        request
+            .header
+            .to_ascii_lowercase()
+            .contains("authorization: bearer "),
+        "authorization header missing"
+    );
+    assert!(request.header.contains(PROVIDER_FIXTURE));
+    assert!(
+        request.body.is_empty(),
+        "GET request should not send a body"
+    );
+    assert!(!stdout(&output).contains(PROVIDER_FIXTURE));
+    assert!(!stderr(&output).contains(PROVIDER_FIXTURE));
+    assert!(stdout(&output).contains("status: 200"));
+    assert!(stdout(&output).contains("[REDACTED:BLINDFOLD_CALL_TOKEN]"));
+    assert!(stderr(&output).contains("raw_secrets_exposed=0"));
+    let trace = blindfold(directory.path(), &["trace", "tail"])?;
+    assert!(trace.status.success(), "{}", stderr(&trace));
+    let trace_output = stdout(&trace);
+    assert!(trace_output.contains("activity: call"));
+    assert!(!trace_output.contains(PROVIDER_FIXTURE));
     Ok(())
 }
 

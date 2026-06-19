@@ -106,13 +106,14 @@ that the agent receives a redacted response.
 | `opencode run ...` with Anthropic | Anthropic through `/anthropic/v1` | HTTP JSON; Anthropic SSE sanitization is supported by the proxy | Native OpenCode login/config; parent env credentials are stripped | Proven for HTTP JSON | Runtime config is injected and fake-upstream coverage verifies request/response redaction. |
 | `opencode run ...` with OpenRouter | OpenRouter through `/openrouter/v1` | OpenAI-compatible HTTP JSON | Native OpenCode login/config; parent env credentials are stripped | Proven for HTTP JSON | Route is configured through the OpenAI-compatible proxy path and covered by fake-upstream tests. |
 | OpenCode TUI/server mode | OpenAI, Anthropic, and OpenRouter config overlay | Depends on OpenCode mode/plugins | Native OpenCode login/config | Unsupported; fails closed | Use explicit `opencode run ...` for the currently tested guarded path. |
-| Agent plugins/tools | Varies | Varies | Varies | Not mediated by wrapper alone | Use `blindfold exec`, MCP stdio preview, or future broker integrations for scoped secret use. |
+| Agent plugins/tools | Varies | Varies | Varies | Not mediated by wrapper alone | Use `blindfold exec`, `blindfold call`, MCP stdio preview, or future broker integrations for scoped secret use. |
 
 The proxy exists only for the child process lifetime and binds to an ephemeral loopback
 port. The child receives an allowlisted environment and does not inherit parent API-key
 variables or unrelated secrets. Authentication must use the agent's persistent
-credential store or login flow. Environment-only provider authentication requires a
-visible `--no-proxy` bypass until a credential broker is implemented.
+credential store or login flow. Environment-only provider authentication still requires
+a visible `--no-proxy` bypass; the current broker commands cover scoped child
+execution and one bearer-token HTTP call, not agent provider login.
 
 For non-interactive `codex exec`, `codex review`, and `opencode run`, Blindfold captures
 child stdout/stderr, redacts detected secrets, then prints the sanitized output while
@@ -143,14 +144,16 @@ CA in v1 and does not inspect arbitrary encrypted HTTPS payloads.
 The wrappers sanitize supported provider JSON and SSE request/response fields. Guard
 mode also sets proxy environment variables, sanitizes captured non-interactive child
 stdout/stderr, and blocks direct known-provider CONNECT tunnels for proxy-aware clients.
-They do not currently sanitize interactive terminal output, broker provider credentials,
-mediate direct filesystem access, or control network clients that ignore proxy settings.
+They do not currently sanitize interactive terminal output, broker provider credentials
+into the agent process, mediate direct filesystem access, or control network clients
+that ignore proxy settings.
 `--strict` therefore refuses to start instead of claiming full workspace controls exist.
 
 Agent file reads are not mediated. If an agent opens `.env`, `.env.local`, or any other
 project file directly, it reads the file from disk exactly as stored. Use `blindfold
-redact FILE` for one-off inspection or `blindfold exec` for controlled child-process
-secret injection. `run --trace` records the session as degraded with
+redact FILE` for one-off inspection, `blindfold exec` for controlled child-process
+secret injection, or `blindfold call` for one bearer-token HTTP request. `run --trace`
+records the session as degraded with
 `direct_filesystem_unmediated`; it does not redact direct file reads.
 
 OpenCode providers other than `openai`, `anthropic`, and `openrouter` are not routed

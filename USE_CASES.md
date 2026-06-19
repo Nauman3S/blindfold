@@ -16,6 +16,7 @@ This is the short guide. You do not need to learn every Blindfold command.
 | Print a file with secrets hidden | `blindfold redact .env` |
 | Check changed code before committing | `blindfold diff-check` |
 | Give one secret to a command | `blindfold exec --secret NAME -- command` |
+| Call one API with a secret | `blindfold call --secret NAME --url https://api.example.com` |
 
 ## First-Time Setup
 
@@ -297,6 +298,38 @@ Do not place the secret itself in command arguments:
 # Wrong: the raw value becomes a process argument.
 your-command --token "$DEMO_API_KEY"
 ```
+
+## Use Case 9: Call One API Without Printing the Secret
+
+Use this when a command or agent needs one bearer-token HTTP call, but you only want
+the response and safe metadata shown:
+
+```sh
+export STRIPE_SECRET_KEY='sk_test_fake_blindfold_example_1234567890'
+blindfold call --secret STRIPE_SECRET_KEY --url https://api.stripe.com/v1/customers
+```
+
+For a POST with a non-secret JSON body:
+
+```sh
+blindfold call \
+  --secret STRIPE_SECRET_KEY \
+  --method POST \
+  --url https://api.stripe.com/v1/customers \
+  --body '{"email":"ada@example.com"}'
+```
+
+Blindfold sends the selected secret as `Authorization: Bearer ...`, redacts the
+response before printing it, and can trace the operation without storing payloads:
+
+```sh
+blindfold call --trace --secret STRIPE_SECRET_KEY --url https://api.stripe.com/v1/customers
+bf trace tail
+```
+
+This is intentionally narrow. It does not replace `curl`, does not support arbitrary
+secret placement yet, and does not stop a separate process from making its own network
+call.
 
 Pass secrets through environment variables. Managed child stdin is currently disabled.
 
