@@ -40,6 +40,8 @@ project follows Semantic Versioning as described in
   `codex review`, and `opencode run` child processes.
 - Fake-upstream and trace-safety coverage for guarded `codex review`, OpenCode
   Anthropic, and OpenCode OpenRouter routes.
+- Guard argument validation for unproven or dangerous Claude, Codex, and OpenCode
+  modes before the child process launches.
 - Secret detectors, redaction modes, bounded repository scanning, and safe reports.
 - Destination-aware policy presets and scoped restoration decisions.
 - XChaCha20-Poly1305 local vault with safe audit metadata.
@@ -66,6 +68,8 @@ project follows Semantic Versioning as described in
   redacting detected secrets from captured stdout/stderr.
 - OpenCode interactive/TUI guard mode now fails closed until that transport is proven
   safe; documented examples use `opencode run ...`.
+- Claude interactive guard mode now fails closed; guarded Claude requires explicit
+  `--print`/`-p`.
 - Proxy upgrade/WebSocket requests now fail closed with a safe `unsupported_transport`
   error before any request body is forwarded.
 - Traced agent sessions now explicitly report unmediated direct filesystem access

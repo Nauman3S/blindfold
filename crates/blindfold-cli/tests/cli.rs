@@ -909,7 +909,8 @@ fn claude_wrapper_routes_through_anthropic_proxy() -> Result<(), Box<dyn Error>>
             "--agent-command",
             agent.to_str().ok_or("non-UTF-8 agent path")?,
             "--",
-            "--version",
+            "--print",
+            "hello",
         ],
     )?;
 
@@ -917,7 +918,7 @@ fn claude_wrapper_routes_through_anthropic_proxy() -> Result<(), Box<dyn Error>>
     assert!(stderr(&output).contains("Blindfold Guard active"));
     assert_eq!(
         fs::read_to_string(directory.path().join("agent-args"))?,
-        "--version\n"
+        "--print\nhello\n"
     );
     let base = fs::read_to_string(directory.path().join("anthropic-base"))?;
     assert!(base.starts_with("http://127.0.0.1:"));
@@ -990,6 +991,92 @@ fn interactive_opencode_guard_refuses_unproven_tui_mode() -> Result<(), Box<dyn 
     assert!(!output.status.success());
     assert!(stderr(&output).contains("OpenCode interactive/TUI mode"));
     assert!(!directory.path().join("agent-args").exists());
+    Ok(())
+}
+
+#[test]
+fn interactive_claude_guard_refuses_unproven_mode() -> Result<(), Box<dyn Error>> {
+    let directory = TestDirectory::new()?;
+    let agent = fake_agent(directory.path())?;
+    let output = blindfold(
+        directory.path(),
+        &[
+            "run",
+            "--guard",
+            "claude",
+            "--agent-command",
+            agent.to_str().ok_or("non-UTF-8 agent path")?,
+        ],
+    )?;
+
+    assert!(!output.status.success());
+    assert!(stderr(&output).contains("Claude interactive mode"));
+    assert!(!directory.path().join("agent-args").exists());
+    Ok(())
+}
+
+#[test]
+fn guard_refuses_unproven_or_dangerous_agent_arguments() -> Result<(), Box<dyn Error>> {
+    for (agent_name, args, expected) in [
+        (
+            "claude",
+            &["--print", "--dangerously-skip-permissions", "hello"][..],
+            "dangerous mode",
+        ),
+        (
+            "claude",
+            &[
+                "--print",
+                "--plugin-url",
+                "https://example.invalid/plugin.zip",
+                "hello",
+            ],
+            "dangerous mode",
+        ),
+        ("codex", &["--search", "exec", "hello"], "dangerous mode"),
+        (
+            "codex",
+            &[
+                "--dangerously-bypass-approvals-and-sandbox",
+                "exec",
+                "hello",
+            ],
+            "dangerous mode",
+        ),
+        (
+            "opencode",
+            &["run", "--interactive", "hello"],
+            "dangerous mode",
+        ),
+        ("opencode", &["serve"], "dangerous mode"),
+    ] {
+        let directory = TestDirectory::new()?;
+        let agent = fake_agent(directory.path())?;
+        let output = Command::new(env!("CARGO_BIN_EXE_blindfold"))
+            .args([
+                "run",
+                "--guard",
+                agent_name,
+                "--agent-command",
+                agent.to_str().ok_or("non-UTF-8 agent path")?,
+                "--",
+            ])
+            .args(args)
+            .current_dir(directory.path())
+            .output()?;
+
+        assert!(
+            !output.status.success(),
+            "{agent_name}: {}",
+            stderr(&output)
+        );
+        assert!(
+            stderr(&output).contains(expected),
+            "{agent_name}: {}",
+            stderr(&output)
+        );
+        assert!(!directory.path().join("agent-args").exists());
+    }
     Ok(())
 }
 
@@ -1075,7 +1162,7 @@ fn guarded_agent_modes_redact_requests_and_responses_to_fake_providers()
             agent_mode: "claude",
             response_mode: "claude",
             upstream_flag: "--anthropic-upstream",
-            agent_args: &[],
+            agent_args: &["--print", "hello"],
             route_fragment: "/v1/messages",
         },
         AgentProviderCase {

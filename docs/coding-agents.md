@@ -6,7 +6,7 @@ application proxy. It does not modify the agents' persistent configuration.
 ## Direct Usage
 
 ```sh
-blindfold run --guard claude -- --version
+blindfold run --guard claude -- --print "summarize this repo"
 blindfold run --guard codex -- exec "summarize this repo"
 blindfold run --guard codex -- review
 blindfold run --guard opencode -- run "inspect this project"
@@ -25,7 +25,7 @@ Override them only when using a compatible gateway:
 ```sh
 blindfold run --guard claude \
   --anthropic-upstream https://gateway.example/anthropic \
-  -- --model sonnet
+  -- --print --model sonnet "summarize this repo"
 
 blindfold run --guard codex \
   --openai-upstream https://gateway.example/openai \
@@ -95,7 +95,7 @@ that the agent receives a redacted response.
 
 | Agent mode | Provider route | Inspectable transport | Credential source | Status | Notes |
 |---|---|---|---|---|---|
-| `claude` | Anthropic through `/anthropic/v1` | HTTP JSON; Anthropic SSE sanitization is supported by the proxy | Native Claude login/config; parent env credentials are stripped | Proven for HTTP JSON | Hooks, plugins, and version-specific transports are not separately mediated. |
+| `claude --print ...` / `claude -p ...` | Anthropic through `/anthropic/v1` | HTTP JSON; Anthropic SSE sanitization is supported by the proxy | Native Claude login/config; parent env credentials are stripped | Proven for HTTP JSON | Interactive Claude, resume, remote, worktree, plugin URL, and permission-bypass modes fail closed. |
 | `codex exec ...` | OpenAI through `/openai/v1` | HTTP JSON | Native Codex login/config; parent env credentials are stripped | Proven for HTTP JSON | Use this for guarded non-interactive Codex tasks. |
 | `codex review` | OpenAI through `/openai/v1` | HTTP JSON | Native Codex login/config; parent env credentials are stripped | Proven for HTTP JSON | Guard injects the base URL and fake-upstream coverage verifies request/response redaction. |
 | interactive `codex` | OpenAI WebSocket path | WebSocket | Native Codex login/config | Unsupported; fails closed | Blindfold refuses this mode before launch because WebSocket sanitization is not implemented. |
@@ -119,11 +119,12 @@ terminal output is not sanitized.
 ## Guard Egress Policy
 
 Guard mode sets `HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY`, and `NO_PROXY` for the child
-agent. Proxy-aware clients cannot open direct tunnels to known LLM providers such as
-OpenAI, Anthropic, OpenRouter, Gemini, Mistral, or Groq.
+agent. For proxy-aware clients, direct CONNECT tunnels to known LLM providers such as
+OpenAI, Anthropic, OpenRouter, Gemini, Mistral, or Groq are blocked.
 
-Common development domains are allowed by default: GitHub, npm, PyPI, crates.io, and Go
-module mirrors. Unknown domains block by default until the project allows them:
+Common development domains are allowed by default for proxy-aware clients: GitHub, npm,
+PyPI, crates.io, and Go module mirrors. Unknown domains that pass through the guard
+proxy block by default until the project allows them:
 
 ```sh
 blindfold allow domain api.example.com

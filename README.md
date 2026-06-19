@@ -250,7 +250,7 @@ Launch an installed coding agent through an ephemeral loopback proxy. Native arg
 go after `--`:
 
 ```sh
-blindfold run --guard claude -- --model sonnet
+blindfold run --guard claude -- --print "summarize this repo"
 blindfold run --guard codex -- exec "summarize this repo"
 blindfold run --guard codex -- review
 blindfold run --guard opencode -- run "inspect this project"
@@ -264,9 +264,10 @@ available in managed mode. Non-interactive `codex exec`, `codex review`, and
 `opencode run` child stdout/stderr are captured and redacted before Blindfold prints
 them; interactive terminal output is not sanitized.
 
-Guard mode also sets proxy variables for the child process. Direct tunnels to known LLM
-providers are blocked, common development registries are allowed, and unknown domains
-block until you allow them for the project:
+Guard mode also sets proxy variables for the child process. For proxy-aware clients,
+direct CONNECT tunnels to known LLM providers are blocked, common development
+registries are allowed, and unknown domains that pass through the guard proxy block
+until you allow them for the project:
 
 ```sh
 blindfold allow domain api.example.com
@@ -274,9 +275,9 @@ blindfold status
 blindfold deny domain api.example.com
 ```
 
-Interactive Codex currently uses a WebSocket transport that Blindfold does not sanitize
-yet. Guarded Codex usage is limited to non-interactive `exec` and `review` until that
-transport is implemented.
+Interactive Claude and Codex modes are blocked until those transports are proven safe.
+Guarded Claude usage requires explicit `--print`/`-p`; guarded Codex usage is limited
+to non-interactive `exec` and `review` until its interactive transport is implemented.
 
 Keep typing the native command names by activating shell wrappers:
 
@@ -329,7 +330,7 @@ managed agent session:
 
 ```sh
 bf redact .env --trace
-bf run --guard claude --trace
+bf run --guard claude --trace -- --print "summarize this repo"
 ```
 
 Inspect the retained traces:

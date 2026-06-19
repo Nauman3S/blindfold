@@ -7,7 +7,7 @@ This is the short guide. You do not need to learn every Blindfold command.
 | I want to... | Command |
 | --- | --- |
 | Start Codex with Blindfold Guard | `blindfold run --guard codex -- exec "summarize this repo"` |
-| Start Claude with Blindfold Guard | `blindfold run --guard claude` |
+| Start Claude with Blindfold Guard | `blindfold run --guard claude -- --print "summarize this repo"` |
 | Start OpenCode with Blindfold Guard | `blindfold run --guard opencode -- run "inspect this repo"` |
 | Trace a command or agent session | `bf redact .env --trace` |
 | Inspect the latest trace | `bf trace tail` |
@@ -57,15 +57,16 @@ blindfold run --guard codex -- exec --sandbox workspace-write "find the risky fi
 
 Blindfold starts a temporary local proxy, launches Codex, and stops the proxy when
 Codex exits. Guard mode also sets proxy environment variables so proxy-aware clients
-cannot tunnel directly to known LLM providers. It does not permanently edit Codex
-configuration.
+route through Blindfold; direct CONNECT attempts to known LLM providers are blocked.
+It does not permanently edit Codex configuration.
 
-Interactive Codex currently uses a WebSocket transport that Blindfold does not sanitize
-yet, so `blindfold run --guard codex` without `exec` or `review` fails closed.
+Interactive Claude and Codex modes are blocked until those transports are proven safe.
+Use `claude --print`/`-p`, `codex exec`, or `codex review` under Guard.
 
 Guard mode allows common development services such as GitHub, npm, PyPI, crates.io,
-and Go module mirrors. Unknown domains are blocked by default. If your project needs a
-specific destination, allow it for this project:
+and Go module mirrors for proxy-aware clients. Unknown domains are blocked by default
+when they pass through the guard proxy. If your project needs a specific destination,
+allow it for this project:
 
 ```sh
 blindfold allow domain api.example.com
@@ -85,14 +86,14 @@ you intentionally need the native environment for one run.
 ## Use Case 2: Run Claude or OpenCode
 
 ```sh
-blindfold run --guard claude
+blindfold run --guard claude -- --print "summarize this repo"
 blindfold run --guard opencode -- run "inspect this repo"
 ```
 
 Examples with native arguments:
 
 ```sh
-blindfold run --guard claude -- --model sonnet
+blindfold run --guard claude -- --print --model sonnet "summarize this repo"
 blindfold run --guard opencode -- run "find the failing test"
 ```
 

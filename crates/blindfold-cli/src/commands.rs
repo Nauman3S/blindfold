@@ -1906,9 +1906,17 @@ async fn run_agent_command(root: &Path, args: &ArgMatches, trace_enabled: bool) 
     }
     eprintln!("- one-run opt-out: --no-proxy or {BYPASS_ENV}=1");
 
+    if let Some(message) = unsupported_guard_argument(agent, &agent_args) {
+        return fail(message);
+    }
     if agent == "codex" && codex_overrides_proxy(&agent_args) {
         return fail(
             "Codex arguments override the managed OpenAI base URL; remove that override or use --no-proxy",
+        );
+    }
+    if agent == "claude" && claude_uses_interactive_mode(&agent_args) {
+        return fail(
+            "Claude interactive mode is not proven safe through Blindfold yet; use `blindfold run --guard claude -- -p ...` or `--no-proxy`",
         );
     }
     if agent == "codex" && codex_uses_interactive_websocket_transport(&agent_args) {
@@ -2112,6 +2120,7 @@ fn write_sanitized_agent_output<W: Write>(
 
 fn sanitizes_managed_agent_output(agent: &str, args: &[String]) -> bool {
     match agent {
+        "claude" => !claude_uses_interactive_mode(args),
         "codex" => !codex_uses_interactive_websocket_transport(args),
         "opencode" => matches!(args.first().map(String::as_str), Some("run")),
         _ => false,
@@ -2261,8 +2270,70 @@ fn codex_uses_interactive_websocket_transport(args: &[String]) -> bool {
     )
 }
 
+fn claude_uses_interactive_mode(args: &[String]) -> bool {
+    !args
+        .iter()
+        .any(|arg| matches!(arg.as_str(), "-p" | "--print"))
+}
+
 fn opencode_uses_unproven_interactive_mode(args: &[String]) -> bool {
     !matches!(args.first().map(String::as_str), Some("run"))
+}
+
+fn unsupported_guard_argument(agent: &str, args: &[String]) -> Option<&'static str> {
+    let has = |flag: &str| args.iter().any(|arg| arg == flag);
+    let starts = |prefix: &str| args.iter().any(|arg| arg.starts_with(prefix));
+    let has_pair = |flag: &str, value: &str| {
+        args.windows(2)
+            .any(|pair| pair[0] == flag && pair[1] == value)
+    };
+    match agent {
+        "claude"
+            if has("--dangerously-skip-permissions")
+                || has("--allow-dangerously-skip-permissions")
+                || has("--remote-control")
+                || starts("--remote-control=")
+                || has("--tmux")
+                || starts("--tmux=")
+                || has("--worktree")
+                || starts("--worktree=")
+                || has("--plugin-url")
+                || starts("--plugin-url=")
+                || has("--continue")
+                || has("-c")
+                || has("--resume")
+                || has("-r")
+                || has("--from-pr")
+                || has_pair("--permission-mode", "bypassPermissions")
+                || starts("--permission-mode=bypassPermissions") =>
+        {
+            Some(
+                "Claude arguments request an unproven or dangerous mode under Guard; use explicit `--print` without resume/remote/worktree/plugin/bypass options, or use --no-proxy",
+            )
+        }
+        "codex"
+            if has("--dangerously-bypass-approvals-and-sandbox")
+                || has("--dangerously-bypass-hook-trust")
+                || has("--search") =>
+        {
+            Some(
+                "Codex arguments request an unproven or dangerous mode under Guard; remove dangerous/search flags or use --no-proxy",
+            )
+        }
+        "opencode"
+            if has("--interactive")
+                || has("--dangerously-skip-permissions")
+                || matches!(
+                    args.first().map(String::as_str),
+                    Some("serve" | "web" | "attach" | "acp" | "mcp" | "github" | "pr" | "plugin")
+                ) =>
+        {
+            Some(
+                "OpenCode arguments request an unproven or dangerous mode under Guard; use `opencode run ...` without interactive/server/plugin options, or use --no-proxy",
+            )
+        }
+        _ => None,
+    }
 }
 
 async fn run_native_agent(agent: &str, command: &str, args: &[String]) -> ExitCode {

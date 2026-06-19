@@ -31,7 +31,7 @@ Blindfold's product promise must be split by mode:
 |---|---:|---:|---:|
 | `scan` | yes | n/a | no |
 | `proxy` | yes | no, if traffic is routed through Blindfold | no |
-| `guard` | yes | no for managed LLM traffic; direct LLM egress should be blocked | no |
+| `guard` | yes | no for managed LLM traffic; known-provider CONNECT egress can be blocked for proxy-aware clients | no |
 | `strict` | no raw secret workspace by design | no | yes |
 
 Guard mode is the practical v1 wedge:
@@ -42,10 +42,10 @@ bf run --guard opencode
 
 In guard mode the agent works in the real repository. Blindfold configures supported
 agents to send OpenAI-compatible, Anthropic-compatible, OpenRouter, or other configured
-LLM traffic through the local redaction proxy. The egress guard should block direct
-known-provider traffic that bypasses Blindfold. Guard mode protects outbound managed
-LLM traffic; it does not protect local file reads, local agent logs, or network clients
-that ignore proxy settings.
+LLM traffic through the local redaction proxy. The egress guard can block direct
+known-provider CONNECT traffic from proxy-aware clients. Guard mode protects outbound
+managed LLM traffic; it does not protect local file reads, local agent logs, arbitrary
+direct API calls, or network clients that ignore proxy settings.
 
 Strict mode is the later stronger promise:
 
@@ -96,8 +96,8 @@ whole-agent containment are not currently implemented.
 
 The core idea:
 
-In guard mode, the agent can read local files, but Blindfold prevents detected secrets
-from being sent through managed LLM/provider traffic.
+In guard mode, the agent can read local files, but Blindfold redacts detected secrets
+from supported managed LLM/provider traffic.
 
 In strict mode, the agent runs in a managed workspace where raw secrets are absent and
 secret use goes through Blindfold's broker.
@@ -146,7 +146,7 @@ Do not start closed source. Developers will not trust a secret-handling local ag
 
 ## 3. Core Product Promise
 
-Blindfold should guarantee this within its controlled boundary:
+Blindfold should enforce this within its controlled boundary:
 
 1. Raw secrets are never sent to LLM requests managed by Blindfold.
 2. Raw secrets are never shown to the agent in managed tool outputs.
@@ -163,7 +163,8 @@ No agent can ever bypass it.
 Instead, be honest:
 
 Blindfold guard mode protects traffic and tools routed through Blindfold.
-Strict mode can sandbox agents to prevent direct filesystem and environment bypasses.
+Strict mode is intended to sandbox agents to prevent direct filesystem and environment
+bypasses.
 
 ---
 
@@ -212,9 +213,9 @@ Primary commands:
 
 blindfold init
 blindfold doctor
-blindfold run --guard claude
-blindfold run --guard codex
-blindfold run --guard opencode
+blindfold run --guard claude -- --print "prompt"
+blindfold run --guard codex -- exec "prompt"
+blindfold run --guard opencode -- run "prompt"
 blindfold run --strict opencode
 blindfold proxy
 blindfold scan .
@@ -248,7 +249,7 @@ Blindfold Guard active.
 Protected:
 - LLM requests routed through Blindfold
 - OpenAI/Anthropic/OpenRouter provider bodies redacted when routed
-- Direct known-provider egress blocked when the egress guard is active
+- Direct known-provider CONNECT egress blocked for proxy-aware clients
 Not protected:
 - Local file reads by the agent
 - Agent local logs

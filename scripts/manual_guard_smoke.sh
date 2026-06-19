@@ -209,7 +209,7 @@ for cmd in claude codex opencode; do
   fi
 done
 
-run_case claude-anthropic claude claude anthropic --anthropic-upstream "/v1/messages"
+run_case claude-anthropic claude claude anthropic --anthropic-upstream "/v1/messages" --print hello
 run_case codex-exec-openai codex codex responses --openai-upstream "/v1/responses" exec hello
 run_case codex-review-openai codex codex responses --openai-upstream "/v1/responses" review
 run_case opencode-openai opencode opencode chat --openai-upstream "/v1/chat/completions" run openai
@@ -217,5 +217,6 @@ run_case opencode-anthropic opencode opencode anthropic --anthropic-upstream "/v
 run_case opencode-openrouter opencode opencode chat --openrouter-upstream "/v1/chat/completions" run openrouter
 fail_closed_case codex-interactive codex
 fail_closed_case opencode-tui opencode
+fail_closed_case claude-interactive claude
 
 echo "Manual guard smoke passed"
