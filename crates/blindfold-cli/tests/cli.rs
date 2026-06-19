@@ -788,10 +788,24 @@ fn call_injects_bearer_secret_and_redacts_response() -> Result<(), Box<dyn Error
     assert!(stdout(&output).contains("status: 200"));
     assert!(stdout(&output).contains("[REDACTED:BLINDFOLD_CALL_TOKEN]"));
     assert!(stderr(&output).contains("raw_secrets_exposed=0"));
-    let trace = blindfold(directory.path(), &["trace", "tail"])?;
+    let trace = blindfold(directory.path(), &["trace", "tail", "--json"])?;
     assert!(trace.status.success(), "{}", stderr(&trace));
     let trace_output = stdout(&trace);
-    assert!(trace_output.contains("activity: call"));
+    let record: serde_json::Value = serde_json::from_str(&trace_output)?;
+    assert_eq!(record["route"], "call");
+    assert_eq!(record["coverage"], "protected");
+    assert_eq!(record["outcome"], "succeeded");
+    assert_eq!(record["request_bytes_before"], 0);
+    assert_eq!(record["request_bytes_after"], 0);
+    assert_eq!(record["response_bytes_before"], 46);
+    assert!(
+        record["response_bytes_after"]
+            .as_u64()
+            .is_some_and(|size| size > 0)
+    );
+    assert_eq!(record["replacements"][0]["category"], "bearer_token");
+    assert_eq!(record["replacements"][0]["pointer"], "/response");
+    assert_eq!(record["replacements"][0]["occurrences"], 1);
     assert!(!trace_output.contains(PROVIDER_FIXTURE));
     Ok(())
 }
@@ -802,6 +816,7 @@ fn call_blocks_unknown_domains_before_injecting_secret() -> Result<(), Box<dyn E
     let output = Command::new(env!("CARGO_BIN_EXE_blindfold"))
         .args([
             "call",
+            "--trace",
             "--secret",
             "BLINDFOLD_CALL_TOKEN",
             "--url",
@@ -815,6 +830,115 @@ fn call_blocks_unknown_domains_before_injecting_secret() -> Result<(), Box<dyn E
     assert!(stderr(&output).contains("unknown domain"));
     assert!(!stdout(&output).contains(PROVIDER_FIXTURE));
     assert!(!stderr(&output).contains(PROVIDER_FIXTURE));
+    let trace = blindfold(directory.path(), &["trace", "tail", "--json"])?;
+    assert!(trace.status.success(), "{}", stderr(&trace));
+    let record: serde_json::Value = serde_json::from_str(&stdout(&trace))?;
+    assert_eq!(record["route"], "call");
+    assert_eq!(record["coverage"], "unprotected");
+    assert_eq!(record["outcome"], "rejected");
+    assert_eq!(record["issue"], "route_not_allowed");
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn call_trace_storage_failure_blocks_before_network() -> Result<(), Box<dyn Error>> {
+    use std::os::unix::fs::symlink;
+
+    let directory = TestDirectory::new()?;
+    let allow = blindfold(directory.path(), &["allow", "domain", "127.0.0.1"])?;
+    assert!(allow.status.success(), "{}", stderr(&allow));
+    let trace_target = directory.path().join("trace-target");
+    fs::write(&trace_target, "")?;
+    symlink(
+        &trace_target,
+        directory.path().join(".blindfold/trace.jsonl"),
+    )?;
+    let listener = TcpListener::bind("127.0.0.1:0")?;
+    listener.set_nonblocking(true)?;
+    let url = format!("http://{}/", listener.local_addr()?);
+
+    let output = Command::new(env!("CARGO_BIN_EXE_blindfold"))
+        .args([
+            "call",
+            "--trace",
+            "--secret",
+            "BLINDFOLD_CALL_TOKEN",
+            "--url",
+            &url,
+        ])
+        .env("BLINDFOLD_CALL_TOKEN", PROVIDER_FIXTURE)
+        .current_dir(directory.path())
+        .output()?;
+
+    assert!(!output.status.success());
+    assert!(stderr(&output).contains("trace storage is unavailable"));
+    assert!(!stdout(&output).contains(PROVIDER_FIXTURE));
+    assert!(!stderr(&output).contains(PROVIDER_FIXTURE));
+    assert!(matches!(
+        listener.accept(),
+        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock
+    ));
+    Ok(())
+}
+
+#[test]
+fn call_rejects_sensitive_and_oversized_bodies_before_network() -> Result<(), Box<dyn Error>> {
+    let directory = TestDirectory::new()?;
+    let listener = TcpListener::bind("127.0.0.1:0")?;
+    listener.set_nonblocking(true)?;
+    let url = format!("http://{}/", listener.local_addr()?);
+    let sensitive_body = format!(r#"{{"token":"{PROVIDER_FIXTURE}"}}"#);
+    let sensitive = Command::new(env!("CARGO_BIN_EXE_blindfold"))
+        .args([
+            "call",
+            "--trace",
+            "--secret",
+            "BLINDFOLD_CALL_TOKEN",
+            "--method",
+            "POST",
+            "--url",
+            &url,
+            "--body",
+            &sensitive_body,
+        ])
+        .env("BLINDFOLD_CALL_TOKEN", PROVIDER_FIXTURE)
+        .current_dir(directory.path())
+        .output()?;
+    assert!(!sensitive.status.success());
+    assert!(stderr(&sensitive).contains("contains sensitive content"));
+    assert!(!stdout(&sensitive).contains(PROVIDER_FIXTURE));
+    assert!(!stderr(&sensitive).contains(PROVIDER_FIXTURE));
+    let sensitive_trace = blindfold(directory.path(), &["trace", "tail", "--json"])?;
+    let sensitive_record: serde_json::Value = serde_json::from_str(&stdout(&sensitive_trace))?;
+    assert_eq!(sensitive_record["issue"], "invalid_payload");
+
+    let oversized_body = "a".repeat(65 * 1024);
+    let oversized = Command::new(env!("CARGO_BIN_EXE_blindfold"))
+        .args([
+            "call",
+            "--trace",
+            "--secret",
+            "BLINDFOLD_CALL_TOKEN",
+            "--method",
+            "POST",
+            "--url",
+            &url,
+            "--body",
+            &oversized_body,
+        ])
+        .env("BLINDFOLD_CALL_TOKEN", PROVIDER_FIXTURE)
+        .current_dir(directory.path())
+        .output()?;
+    assert!(!oversized.status.success());
+    assert!(stderr(&oversized).contains("request body is too large"));
+    let oversized_trace = blindfold(directory.path(), &["trace", "tail", "--json"])?;
+    let oversized_record: serde_json::Value = serde_json::from_str(&stdout(&oversized_trace))?;
+    assert_eq!(oversized_record["issue"], "request_too_large");
+    assert!(matches!(
+        listener.accept(),
+        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock
+    ));
     Ok(())
 }
 

@@ -331,7 +331,8 @@ bf trace tail
 
 This is intentionally narrow. It does not replace `curl`, does not support arbitrary
 secret placement yet, and does not stop a separate process from making its own network
-call.
+call. `--body` is limited to 64 KiB of non-secret JSON; Blindfold rejects a body that
+contains the selected secret or another detected credential instead of forwarding it.
 
 Pass secrets through environment variables. Managed child stdin is currently disabled.
 

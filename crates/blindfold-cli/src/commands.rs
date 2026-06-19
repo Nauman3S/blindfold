@@ -50,6 +50,7 @@ const MASTER_KEY_ENV: &str = "BLINDFOLD_MASTER_KEY";
 const BYPASS_ENV: &str = "BLINDFOLD_BYPASS";
 const MANAGED_AGENT_OUTPUT_LIMIT: usize = 4 * 1024 * 1024;
 const MANAGED_AGENT_OUTPUT_TRUNCATION_OVERLAP: usize = 512;
+const CALL_REQUEST_LIMIT: usize = 64 * 1024;
 const CALL_RESPONSE_LIMIT: usize = 1024 * 1024;
 const DEFAULT_ALLOWED_DOMAINS: &[&str] = &[
     "github.com",
@@ -88,15 +89,7 @@ pub(crate) async fn run() -> ExitCode {
         Some(("exec", args)) => traced_command(&root, trace_enabled, TraceRoute::Exec, || {
             exec_command(args)
         }),
-        Some(("call", args)) => {
-            traced_async_command(
-                &root,
-                trace_enabled,
-                TraceRoute::Call,
-                call_command(&root, args),
-            )
-            .await
-        }
+        Some(("call", args)) => call_command(&root, args, trace_enabled).await,
         Some(("policy", args)) => traced_command(&root, trace_enabled, TraceRoute::Policy, || {
             policy_command(args)
         }),
@@ -832,50 +825,23 @@ fn exec_command(args: &ArgMatches) -> ExitCode {
     }
 }
 
-async fn call_command(root: &Path, args: &ArgMatches) -> ExitCode {
-    let Some(secret_name) = args.get_one::<String>("secret") else {
-        return fail("a secret name is required");
+async fn call_command(root: &Path, args: &ArgMatches, trace_enabled: bool) -> ExitCode {
+    let trace_store = match optional_call_trace_store(root, trace_enabled) {
+        Ok(store) => store,
+        Err(code) => return code,
     };
-    let env_name = match EnvironmentName::new(secret_name.clone()) {
-        Ok(name) => name,
-        Err(error) => return fail(&error.to_string()),
+    let (env_name, secret) = match call_secret(args) {
+        Ok(secret) => secret,
+        Err(code) => return code,
     };
-    let Ok(secret) = env::var(secret_name) else {
-        return fail("a requested secret is unavailable in the parent environment");
+    let request_body_len = match validate_call_body(args, &secret, trace_store.as_ref()) {
+        Ok(length) => length,
+        Err(code) => return code,
     };
-    if secret.is_empty() {
-        return fail("a requested secret is empty");
-    }
-    let Some(url_text) = args.get_one::<String>("url") else {
-        return fail("a URL is required");
+    let url = match allowed_call_url(root, args, trace_store.as_ref(), request_body_len) {
+        Ok(url) => url,
+        Err(code) => return code,
     };
-    let Ok(url) = reqwest::Url::parse(url_text) else {
-        return fail("invalid URL");
-    };
-    if !matches!(url.scheme(), "http" | "https") {
-        return fail("unsupported URL scheme");
-    }
-    let Some(host) = url.host_str() else {
-        return fail("URL host is required");
-    };
-    let policy = match EgressNetworkPolicy::load(root) {
-        Ok(policy) => policy,
-        Err(message) => return fail(message),
-    };
-    match policy.decision(host) {
-        EgressDecision::Allow => {}
-        EgressDecision::BlockKnownProvider => {
-            return fail("brokered HTTP call blocked: LLM provider domains must use the LLM proxy");
-        }
-        EgressDecision::BlockDenied => {
-            return fail("brokered HTTP call blocked: domain is denied for this project");
-        }
-        EgressDecision::BlockUnknown => {
-            return fail(
-                "brokered HTTP call blocked: unknown domain; use `blindfold allow domain <host>`",
-            );
-        }
-    }
     let method = match args.get_one::<String>("method").map(String::as_str) {
         Some("POST") => reqwest::Method::POST,
         _ => reqwest::Method::GET,
@@ -907,16 +873,38 @@ async fn call_command(root: &Path, args: &ArgMatches) -> ExitCode {
         Ok(body) => body,
         Err(message) => return fail(message),
     };
-    let sanitizer = match DetectorSanitizer::new() {
-        Ok(sanitizer) => sanitizer,
+    let sanitized = match sanitize_call_response(&body, &secret, &env_name) {
+        Ok(sanitized) => sanitized,
         Err(code) => return code,
     };
-    let output = String::from_utf8_lossy(&body);
-    let exact_redacted = output.replace(&secret, &format!("[REDACTED:{}]", env_name.as_str()));
-    let safe_output = sanitizer.sanitize_text(&exact_redacted);
+    let trace_outcome = if status.is_success() {
+        TraceOutcome::Succeeded
+    } else {
+        TraceOutcome::Failed
+    };
+    if let Some(store) = &trace_store
+        && let Err(error) = append_trace_to_store(
+            store,
+            TraceRoute::Call,
+            TraceCoverage::Protected,
+            trace_outcome,
+            (
+                u64::try_from(request_body_len).unwrap_or(u64::MAX),
+                u64::try_from(request_body_len).unwrap_or(u64::MAX),
+            ),
+            (
+                u64::try_from(body.len()).unwrap_or(u64::MAX),
+                u64::try_from(sanitized.text.len()).unwrap_or(u64::MAX),
+            ),
+            sanitized.replacements,
+            None,
+        )
+    {
+        return fail(&error.to_string());
+    }
     println!("status: {}", status.as_u16());
-    print!("{safe_output}");
-    if !safe_output.ends_with('\n') {
+    print!("{}", sanitized.text);
+    if !sanitized.text.ends_with('\n') {
         println!();
     }
     eprintln!(
@@ -929,6 +917,137 @@ async fn call_command(root: &Path, args: &ArgMatches) -> ExitCode {
     } else {
         ExitCode::FAILURE
     }
+}
+
+fn optional_call_trace_store(root: &Path, enabled: bool) -> Result<Option<TraceStore>, ExitCode> {
+    if !enabled {
+        return Ok(None);
+    }
+    open_trace_store(root)
+        .map(Some)
+        .map_err(|error| fail(&error.to_string()))
+}
+
+fn call_secret(args: &ArgMatches) -> Result<(EnvironmentName, String), ExitCode> {
+    let Some(secret_name) = args.get_one::<String>("secret") else {
+        return Err(fail("a secret name is required"));
+    };
+    let env_name =
+        EnvironmentName::new(secret_name.clone()).map_err(|error| fail(&error.to_string()))?;
+    let secret = env::var(secret_name)
+        .map_err(|_| fail("a requested secret is unavailable in the parent environment"))?;
+    if secret.is_empty() {
+        return Err(fail("a requested secret is empty"));
+    }
+    Ok((env_name, secret))
+}
+
+fn validate_call_body(
+    args: &ArgMatches,
+    secret: &str,
+    trace_store: Option<&TraceStore>,
+) -> Result<usize, ExitCode> {
+    let Some(body) = args.get_one::<String>("body") else {
+        return Ok(0);
+    };
+    if body.len() > CALL_REQUEST_LIMIT {
+        return Err(reject_call(
+            trace_store,
+            body.len(),
+            TraceIssue::RequestTooLarge,
+            "brokered HTTP request body is too large",
+        ));
+    }
+    let body_has_findings = detectors().map(|detectors| !detectors.detect(body).is_empty())?;
+    if body.contains(secret) || body_has_findings {
+        return Err(reject_call(
+            trace_store,
+            body.len(),
+            TraceIssue::InvalidPayload,
+            "brokered HTTP request body contains sensitive content",
+        ));
+    }
+    Ok(body.len())
+}
+
+fn allowed_call_url(
+    root: &Path,
+    args: &ArgMatches,
+    trace_store: Option<&TraceStore>,
+    request_body_len: usize,
+) -> Result<reqwest::Url, ExitCode> {
+    let Some(url_text) = args.get_one::<String>("url") else {
+        return Err(fail("a URL is required"));
+    };
+    let url = reqwest::Url::parse(url_text).map_err(|_| fail("invalid URL"))?;
+    if !matches!(url.scheme(), "http" | "https") {
+        return Err(fail("unsupported URL scheme"));
+    }
+    let Some(host) = url.host_str() else {
+        return Err(fail("URL host is required"));
+    };
+    let policy = EgressNetworkPolicy::load(root).map_err(fail)?;
+    let message = match policy.decision(host) {
+        EgressDecision::Allow => return Ok(url),
+        EgressDecision::BlockKnownProvider => {
+            "brokered HTTP call blocked: LLM provider domains must use the LLM proxy"
+        }
+        EgressDecision::BlockDenied => {
+            "brokered HTTP call blocked: domain is denied for this project"
+        }
+        EgressDecision::BlockUnknown => {
+            "brokered HTTP call blocked: unknown domain; use `blindfold allow domain <host>`"
+        }
+    };
+    Err(reject_call(
+        trace_store,
+        request_body_len,
+        TraceIssue::RouteNotAllowed,
+        message,
+    ))
+}
+
+struct SanitizedCallResponse {
+    text: String,
+    replacements: Vec<TraceReplacement>,
+}
+
+fn sanitize_call_response(
+    body: &[u8],
+    secret: &str,
+    env_name: &EnvironmentName,
+) -> Result<SanitizedCallResponse, ExitCode> {
+    let sanitizer = DetectorSanitizer::new()?;
+    let output = String::from_utf8_lossy(body);
+    let exact_occurrences = output.matches(secret).count();
+    let exact_redacted = output.replace(secret, &format!("[REDACTED:{}]", env_name.as_str()));
+    let Ok(redacted) = sanitizer.redactor.redact(
+        &exact_redacted,
+        RedactionOptions::new(RedactionMode::Placeholder),
+    ) else {
+        return Err(fail("could not sanitize brokered HTTP response"));
+    };
+    let mut grouped = BTreeMap::<TraceCategory, u32>::new();
+    if let Ok(count) = u32::try_from(exact_occurrences)
+        && count > 0
+    {
+        grouped.insert(TraceCategory::BearerToken, count);
+    }
+    for finding in redacted.findings() {
+        *grouped.entry(trace_category(finding.kind())).or_default() += 1;
+    }
+    let replacements = grouped
+        .into_iter()
+        .enumerate()
+        .map(|(index, (category, count))| {
+            TraceReplacement::new(format!("S{}", index + 1), category, "/response", count)
+        })
+        .collect::<blindfold_trace::Result<Vec<_>>>()
+        .map_err(|error| fail(&error.to_string()))?;
+    Ok(SanitizedCallResponse {
+        text: redacted.into_text(),
+        replacements,
+    })
 }
 
 async fn read_bounded_response(mut response: reqwest::Response) -> Result<Vec<u8>, &'static str> {
@@ -950,6 +1069,38 @@ async fn read_bounded_response(mut response: reqwest::Response) -> Result<Vec<u8
         body.extend_from_slice(&chunk);
     }
     Ok(body)
+}
+
+fn reject_call(
+    store: Option<&TraceStore>,
+    request_body_len: usize,
+    issue: TraceIssue,
+    message: &str,
+) -> ExitCode {
+    match append_call_rejection_trace(store, request_body_len, issue) {
+        Ok(()) => fail(message),
+        Err(error) => fail(&error.to_string()),
+    }
+}
+
+fn append_call_rejection_trace(
+    store: Option<&TraceStore>,
+    request_body_len: usize,
+    issue: TraceIssue,
+) -> blindfold_trace::Result<()> {
+    let Some(store) = store else {
+        return Ok(());
+    };
+    append_trace_to_store(
+        store,
+        TraceRoute::Call,
+        TraceCoverage::Unprotected,
+        TraceOutcome::Rejected,
+        (u64::try_from(request_body_len).unwrap_or(u64::MAX), 0),
+        (0, 0),
+        Vec::new(),
+        Some(issue),
+    )
 }
 
 fn policy_command(args: &ArgMatches) -> ExitCode {
@@ -1375,13 +1526,36 @@ fn append_trace_record(
     issue: Option<TraceIssue>,
 ) -> blindfold_trace::Result<()> {
     let store = open_trace_store(root)?;
-    let record = TraceRecord::now(
-        next_trace_request_id(),
+    append_trace_to_store(
+        &store,
         route,
         coverage,
         outcome,
         bytes,
         (0, 0),
+        replacements,
+        issue,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn append_trace_to_store(
+    store: &TraceStore,
+    route: TraceRoute,
+    coverage: TraceCoverage,
+    outcome: TraceOutcome,
+    request_bytes: (u64, u64),
+    response_bytes: (u64, u64),
+    replacements: Vec<TraceReplacement>,
+    issue: Option<TraceIssue>,
+) -> blindfold_trace::Result<()> {
+    let record = TraceRecord::now(
+        next_trace_request_id(),
+        route,
+        coverage,
+        outcome,
+        request_bytes,
+        response_bytes,
         replacements,
         issue,
     )?;

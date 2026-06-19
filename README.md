@@ -167,7 +167,8 @@ Blindfold reads the named environment variable, sends it only as
 `Authorization: Bearer ...`, applies the project domain allow/deny policy, bounds the
 response body, redacts the selected value from the response, and records only
 payload-free trace metadata when `--trace` is enabled. This is a narrow broker, not a
-general HTTP client or transparent network proxy.
+general HTTP client or transparent network proxy. Optional `--body` JSON is limited to
+64 KiB and must not contain the selected secret or another detected credential.
 
 ## Check Policy Behavior
 

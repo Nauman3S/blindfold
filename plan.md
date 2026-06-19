@@ -1287,10 +1287,10 @@ output to the caller.
 - [x] `P5-12` Test child crashes, signals, timeouts, binary output, large output, and
   output containing all injected values.
 - [~] `P5-13` Implement `blindfold call --secret NAME --url URL` for one brokered
-  bearer-token HTTP request with project domain policy, bounded redacted response
-  output, and payload-free tracing. Current support is environment-backed bearer
-  tokens only; vault-backed secrets and arbitrary header/body placement are not
-  integrated.
+  bearer-token HTTP request with project domain policy, bounded non-secret body input,
+  redacted response output, trace preflight, and payload-free exchange metadata.
+  Current support is environment-backed bearer tokens only; vault-backed secrets and
+  arbitrary header/body placement are not integrated.
 
 **Exit criteria:**
 
