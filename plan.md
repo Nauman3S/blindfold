@@ -221,6 +221,7 @@ blindfold proxy
 blindfold scan .
 blindfold redact .env
 blindfold exec --secret STRIPE_SECRET_KEY -- npm test
+blindfold allow domain api.stripe.com
 blindfold call --secret STRIPE_SECRET_KEY --url https://api.stripe.com/v1/customers
 blindfold audit
 blindfold status
@@ -588,6 +589,7 @@ Output redacted:
 Support later:
 
 blindfold exec --env-file .env.local -- npm test
+blindfold allow domain api.stripe.com
 blindfold call --secret STRIPE_KEY --url https://api.stripe.com/v1/customers
 
 Never show the real secret to the agent.
@@ -935,8 +937,8 @@ format. Add a blocker link or note whenever status is `[!]`.
 | P2 | SafeRefs and policy | `[~]` | Codex | TBD | P1 | `V-13`, `V-14` |
 | P3 | Encrypted vault and audit | `[~]` | Codex | TBD | P2 | `V-06`, `V-10` |
 | P4 | Local LLM proxy | `[~]` | Codex | TBD | P1-P3 | `V-07`, `V-11` |
-| P4B | Egress network guard | `[ ]` | Codex | TBD | P4 | Phase exit criteria |
-| P4C | Deep inspection MITM spike | `[ ]` | Codex | TBD | P4-P4B | Phase exit criteria |
+| P4B | Egress network guard | `[~]` | Codex | TBD | P4 | Phase exit criteria |
+| P4C | Deep inspection MITM spike | `[~]` | Codex | TBD | P4-P4B | Phase exit criteria |
 | P5 | Secret execution runtime | `[~]` | Codex | TBD | P1-P3 | `V-06`, `V-12` |
 | P6 | Guard mode agent runner | `[~]` | Codex | TBD | P4-P5, P4B for full guard | `V-05` |
 | P7 | Release hardening | `[~]` | Codex | TBD | P0-P6 | `V-01` through `V-18` |
@@ -1138,8 +1140,9 @@ returns to the agent.
 - [x] `P4-04` Implement Anthropic-compatible request normalization and sanitization.
 - [x] `P4-05` Scan supported text-bearing fields, including nested messages,
   OpenAI function/tool arguments, Anthropic tool inputs/JSON deltas, and system prompts.
-- [x] `P4-06` Strip or redact sensitive headers and query parameters from logs and
-  errors.
+- [x] `P4-06` Keep headers and query parameters out of logs/errors; reject detected
+  secrets and credential-named URL/header metadata before forwarding while preserving
+  required provider authentication headers.
 - [x] `P4-07` Sanitize non-streaming upstream responses.
 - [~] `P4-08` Implement streaming sanitization with bounded buffering and overlap
   sufficient for the longest supported detector.
@@ -1302,6 +1305,9 @@ output to the caller.
   process arguments.
 - [x] Exit codes and signals behave like direct command execution.
 - [x] Only explicitly approved secrets and environment variables reach the child.
+- [x] Brokered HTTP calls require project domain approval, reject sensitive/oversized
+  request bodies before network activity, redact bounded responses, and emit accurate
+  payload-free trace metadata.
 
 ### Phase 6: Guard Mode Agent Runner
 
@@ -1659,30 +1665,35 @@ boundary in the first screenful.
 
 ## 14. Verification Matrix
 
-Use this table as the release evidence index. Replace `TBD` with the actual command,
-test, report, or artifact path when implementation begins.
+Use this table as the release evidence index. Replace remaining `TBD` entries when
+repeatable evidence exists.
+
+Last local verification: 2026-06-19, implementation through `b408d97`. Formatting,
+strict Clippy, full workspace tests, release build, installed-agent fake-provider smoke,
+and manual broker trace smoke passed. Installed commands exercised by the smoke script:
+Claude Code 2.1.152, Codex CLI 0.139.0, and OpenCode 1.17.3.
 
 | ID | Area | Verification | Pass condition | Evidence |
 |---|---|---|---|---|
-| `V-01` | Build | Clean debug and release builds | No warnings designated as errors; artifacts produced | TBD |
-| `V-02` | Formatting/lint | Formatter and linter | No failures | TBD |
-| `V-03` | Unit tests | Full unit suite | All tests pass | TBD |
-| `V-04` | Integration | CLI/config/vault/proxy/exec suites | All tests pass | TBD |
-| `V-05` | End to end | Claude wrapper demo with fake provider | Demo succeeds; no raw fixture escapes | TBD |
-| `V-06` | Leak regression | Search captured output, logs, audit, temp artifacts, and fake upstream traffic | Zero raw fixture matches | TBD |
-| `V-07` | Streaming | Split each fixture at every byte boundary supported by the detector | Every reconstruction is withheld/redacted | TBD |
+| `V-01` | Build | Clean debug and release builds | No warnings designated as errors; artifacts produced | `cargo build -p blindfold-cli`; `cargo build --release --workspace` |
+| `V-02` | Formatting/lint | Formatter and linter | No failures | `cargo fmt --all`; `cargo clippy --workspace --all-targets --all-features -- -D warnings` |
+| `V-03` | Unit tests | Full unit suite | All tests pass | `cargo test --workspace --all-targets` |
+| `V-04` | Integration | CLI/config/vault/proxy/exec suites | All tests pass | `cargo test --workspace --all-targets`; 42 CLI and 13 proxy integration tests at latest verification |
+| `V-05` | End to end | Claude wrapper demo with fake provider | Demo succeeds; no raw fixture escapes | `scripts/manual_guard_smoke.sh`; covers Claude, Codex `exec`/`review`, and OpenCode OpenAI/Anthropic/OpenRouter |
+| `V-06` | Leak regression | Search captured output, logs, audit, temp artifacts, and fake upstream traffic | Zero raw fixture matches | `cargo test --workspace --all-targets`; fake-upstream, broker, trace, exec, vault, and diff leak assertions |
+| `V-07` | Streaming | Split each fixture at every byte boundary supported by the detector | Every reconstruction is withheld/redacted | `cargo test -p blindfold-exec redacts_every_split_without_a_newline`; `cargo test -p blindfold-proxy split_sse_chunks_are_withheld_and_sanitized` |
 | `V-08` | Detector quality | Positive and false-positive corpora | Meets documented recall/false-positive budget | TBD |
 | `V-09` | Structured data | Parse redacted `.env`, JSON, YAML, TOML, and URLs | Output remains valid/useful or is safely blocked | TBD |
 | `V-10` | Vault | Wrong key, corruption, permissions, concurrency, recovery, and audit read validation | Fails closed; no raw output | `cargo test -p blindfold-vault`; symlink and malformed audit tests |
-| `V-11` | Proxy security | Loopback, upstream allowlist, loop prevention, limits, malformed payloads | Unsafe cases rejected safely | TBD |
+| `V-11` | Proxy security | Loopback, upstream allowlist, loop prevention, limits, malformed payloads | Unsafe cases rejected safely | `cargo test -p blindfold-proxy`; includes sensitive path/query/header rejection before upstream |
 | `V-11A` | Trace safety | Explicit enablement, closed schema, no payload/header/query retention, rotation, symlink rejection, clear | Trace JSON contains metadata only and modified records fail closed | `cargo test -p blindfold-trace -p blindfold-proxy -p blindfold-cli` |
 | `V-12` | Exec isolation | Inspect child env and process args | Only approved values present; secret absent from argv | `cargo test -p blindfold-cli managed_wrapper_does_not_inherit_parent_secrets` |
-| `V-13` | Policy | Complete mode/destination/sensitivity matrix | Every case has expected deterministic action | TBD |
+| `V-13` | Policy | Complete mode/destination/sensitivity matrix | Every case has expected deterministic action | `cargo test -p blindfold-policy complete_builtin_matrix_is_deterministic_and_matches_contract` |
 | `V-14` | SafeRef abuse | Forged, malformed, replayed, expired, and cross-project references | No unauthorized restoration | TBD |
 | `V-15` | Performance | Large repository, large file, and high-volume stream benchmarks | Meets recorded budgets without unbounded memory | TBD |
 | `V-16` | Dependencies | Vulnerability, license, and supply-chain checks | No unapproved critical/high issue or incompatible license | TBD |
 | `V-17` | Platforms | Clean install and demo on supported macOS/Linux matrix | All required platforms pass | TBD |
-| `V-18` | Documentation | Follow quickstart from a clean environment | Commands and stated behavior match release | TBD |
+| `V-18` | Documentation | Follow quickstart from a clean environment | Commands and stated behavior match release | README/`USE_CASES.md` command review plus `scripts/manual_guard_smoke.sh`; clean-environment install remains covered by V-17/P7-04 |
 
 ### Initial Performance Budgets
 
@@ -1734,11 +1745,11 @@ Track these explicitly; unresolved high-impact decisions block the affected phas
 
 | ID | Type | Question or risk | Needed by | Status |
 |---|---|---|---|---|
-| `D-01` | Decision | Confirm Rust after a short proxy/streaming/keychain spike | P0 | Open |
-| `D-02` | Decision | Select encrypted vault backend and key management model | P3 | Open |
-| `D-03` | Decision | Define the exact SafeRef grammar and anti-forgery model | P2 | Open |
-| `D-04` | Decision | Define supported macOS/Linux versions and Windows stance | P0 | Open |
-| `D-05` | Decision | Confirm Claude Code integration surfaces and bypass limitations | P6 | Open |
+| `D-01` | Decision | Confirm Rust after a short proxy/streaming/keychain spike | P0 | Decided: Rust 1.96/edition 2024; `docs/decisions/0001-rust-baseline.md` |
+| `D-02` | Decision | Select encrypted vault backend and key management model | P3 | Decided direction: portable encrypted vault implemented; OS-protected key adapter remains P3-03; `docs/decisions/0002-vault-backend.md` |
+| `D-03` | Decision | Define the exact SafeRef grammar and anti-forgery model | P2 | Decided: versioned opaque non-authorizing envelope; `docs/decisions/0003-saferef-format.md` |
+| `D-04` | Decision | Define supported macOS/Linux versions and Windows stance | P0 | Decided: documented macOS/Linux matrix, Windows unsupported for v0.1; `docs/decisions/0004-managed-boundary-and-platforms.md` |
+| `D-05` | Decision | Confirm Claude Code integration surfaces and bypass limitations | P6 | Decided: proven non-interactive modes only, unsupported transports fail closed; `docs/decisions/0005-proxy-fail-closed-compatibility.md` |
 | `D-06` | Decision | Set measurable detector recall and false-positive budgets | P1 | Open |
 | `R-01` | Risk | Wrapper cannot mediate every Claude Code file/tool/network path | P6 | Open |
 | `R-02` | Risk | Streaming output leaks a value before enough context is buffered | P4 | Open |
