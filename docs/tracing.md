@@ -6,7 +6,7 @@ log. It is disabled unless the global `--trace` flag is supplied.
 ```sh
 bf --trace doctor
 bf redact .env --trace
-bf run --guard claude --trace
+bf run --guard claude --trace -- --print "summarize this repo"
 bf trace list
 bf trace show req_...
 bf trace tail

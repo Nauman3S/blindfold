@@ -4,6 +4,7 @@ use std::{
     env, fs,
     net::{IpAddr, TcpListener},
     path::Path,
+    process::Command,
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -95,12 +96,24 @@ pub(crate) fn run(root: &Path) -> DoctorReport {
                 outcome: check_command(&config.claude.command),
             },
             Check {
+                label: "Claude compatibility",
+                outcome: check_agent_version(&config.claude.command, &["--version"], "Claude Code"),
+            },
+            Check {
                 label: "Codex command",
                 outcome: check_optional_command("codex"),
             },
             Check {
+                label: "Codex compatibility",
+                outcome: check_agent_version("codex", &["--version"], "codex-cli"),
+            },
+            Check {
                 label: "OpenCode command",
                 outcome: check_optional_command("opencode"),
+            },
+            Check {
+                label: "OpenCode compatibility",
+                outcome: check_agent_version("opencode", &["--version"], ""),
             },
         ],
     }
@@ -196,6 +209,32 @@ fn check_optional_command(command: &str) -> Outcome {
         Outcome::Fail(_) => Outcome::Info("not installed; this agent wrapper is unavailable"),
         outcome => outcome,
     }
+}
+
+fn check_agent_version(command: &str, args: &[&str], expected_marker: &str) -> Outcome {
+    if matches!(check_optional_command(command), Outcome::Info(_)) {
+        return Outcome::Info("not installed; compatibility not checked");
+    }
+    let Ok(output) = Command::new(command).args(args).output() else {
+        return Outcome::Info("version command could not be executed");
+    };
+    if !output.status.success() {
+        return Outcome::Info("version command returned non-zero status");
+    }
+    let mut version = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+    if version.is_empty() {
+        String::from_utf8_lossy(&output.stderr)
+            .trim()
+            .clone_into(&mut version);
+    }
+    let first_line = version.lines().next().unwrap_or_default().trim();
+    if first_line.is_empty() {
+        return Outcome::Info("installed; version output empty");
+    }
+    if !expected_marker.is_empty() && !first_line.contains(expected_marker) {
+        return Outcome::Info("installed; version format is unrecognized");
+    }
+    Outcome::Pass("installed; supported guard forms require explicit non-interactive mode")
 }
 
 #[cfg(unix)]

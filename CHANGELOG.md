@@ -42,6 +42,8 @@ project follows Semantic Versioning as described in
   Anthropic, and OpenCode OpenRouter routes.
 - Guard argument validation for unproven or dangerous Claude, Codex, and OpenCode
   modes before the child process launches.
+- `doctor` compatibility checks for installed Claude, Codex, and OpenCode commands.
+- CI execution of the manual guard smoke script against fake local providers.
 - Secret detectors, redaction modes, bounded repository scanning, and safe reports.
 - Destination-aware policy presets and scoped restoration decisions.
 - XChaCha20-Poly1305 local vault with safe audit metadata.

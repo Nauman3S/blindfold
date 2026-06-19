@@ -51,12 +51,14 @@ blindfold --help
 ```sh
 blindfold init
 blindfold doctor
-blindfold run --guard codex
+blindfold run --guard codex -- exec "summarize this repo"
 ```
 
 Common tasks and copy-paste examples are in [USE_CASES.md](USE_CASES.md).
-The current configuration file is validated by `doctor`, but most runtime commands still
-use CLI defaults and flags; runtime configuration integration remains preview work.
+`doctor` validates the configuration and reports installed Claude, Codex, and OpenCode
+compatibility status without printing command paths or secrets. Most runtime commands
+still use CLI defaults and flags; runtime configuration integration remains preview
+work.
 
 ## Scan Files and Directories
 

@@ -55,6 +55,9 @@ opencode run "fix the tests"
 
 To activate this for future shells, add the `eval` command to `.zshrc` or `.bashrc`.
 The generated functions call the real executable with `command`, so they do not recurse.
+Bare interactive `claude`, `codex`, or `opencode` shell-wrapper invocations will fail
+closed under Guard until those transports are proven safe. Pass the supported
+non-interactive arguments shown above.
 
 ## Opt Out
 

@@ -531,6 +531,9 @@ fn doctor_reports_all_required_checks() -> Result<(), Box<dyn Error>> {
     assert!(output.contains("storage directory"));
     assert!(output.contains("loopback port"));
     assert!(output.contains("Claude command"));
+    assert!(output.contains("Claude compatibility"));
+    assert!(output.contains("Codex compatibility"));
+    assert!(output.contains("OpenCode compatibility"));
     Ok(())
 }
 

@@ -37,7 +37,7 @@ Blindfold's product promise must be split by mode:
 Guard mode is the practical v1 wedge:
 
 ```sh
-bf run --guard opencode
+bf run --guard opencode -- run "prompt"
 ```
 
 In guard mode the agent works in the real repository. Blindfold configures supported
@@ -232,7 +232,7 @@ blindfold mcp
 Initial priority:
 
 blindfold init
-blindfold run --guard opencode
+blindfold run --guard opencode -- run "prompt"
 blindfold scan .
 blindfold exec --secret NAME -- command
 
@@ -241,7 +241,7 @@ The first release must feel simple.
 Good first-run UX:
 
 blindfold init
-blindfold run --guard opencode
+blindfold run --guard opencode -- run "prompt"
 
 Output example:
 
@@ -1578,7 +1578,7 @@ Strict mode:
 
 ```sh
 blindfold init
-blindfold run --guard opencode
+blindfold run --guard opencode -- run "prompt"
 ```
 ````
 
@@ -1792,7 +1792,7 @@ The first release demo is:
 
 ```sh
 blindfold init
-blindfold run --guard opencode
+blindfold run --guard opencode -- run "prompt"
 ```
 
 Within a sample project, OpenCode may read local files normally, including fake secret
