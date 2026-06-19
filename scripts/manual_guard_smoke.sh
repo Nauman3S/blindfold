@@ -200,7 +200,7 @@ SH
   echo "PASS $name"
 }
 
-echo "Manual guard smoke using $BIN"
+echo "Manual guard fixture smoke using $BIN (fake agent clients and fake providers)"
 for cmd in claude codex opencode; do
   if command -v "$cmd" >/dev/null 2>&1; then
     echo "FOUND $cmd: $(command -v "$cmd")"
@@ -210,8 +210,8 @@ for cmd in claude codex opencode; do
 done
 
 run_case claude-anthropic claude claude anthropic --anthropic-upstream "/v1/messages" --print hello
-run_case codex-exec-openai codex codex responses --openai-upstream "/v1/responses" exec hello
-run_case codex-review-openai codex codex responses --openai-upstream "/v1/responses" review
+run_case codex-exec-openai codex codex responses --openai-upstream "/responses" exec hello
+run_case codex-review-openai codex codex responses --openai-upstream "/responses" review
 run_case opencode-openai opencode opencode chat --openai-upstream "/v1/chat/completions" run openai
 run_case opencode-anthropic opencode opencode anthropic --anthropic-upstream "/v1/messages" run anthropic
 run_case opencode-openrouter opencode opencode chat --openrouter-upstream "/v1/chat/completions" run openrouter

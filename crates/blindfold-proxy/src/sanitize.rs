@@ -107,6 +107,15 @@ pub(crate) struct Observation {
     pub(crate) pointer: String,
 }
 
+impl Observation {
+    pub(crate) fn new(category: Category, pointer: impl Into<String>) -> Self {
+        Self {
+            category,
+            pointer: pointer.into(),
+        }
+    }
+}
+
 fn sanitize_openai(
     value: &mut Value,
     sanitizer: &dyn Sanitizer,

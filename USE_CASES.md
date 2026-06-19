@@ -48,6 +48,9 @@ Run Codex non-interactively through Guard:
 blindfold run --guard codex -- exec "summarize this repo"
 ```
 
+Do not put another `codex exec ...` command inside the quoted prompt. Everything after
+`--` is already passed to Codex, so the model prompt is only the final string.
+
 Pass normal Codex arguments after `--`:
 
 ```sh

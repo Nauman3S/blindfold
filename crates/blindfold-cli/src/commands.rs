@@ -390,21 +390,9 @@ fn cli() -> Command {
                         .action(ArgAction::SetTrue),
                 )
                 .arg(Arg::new("strict").long("strict").action(ArgAction::SetTrue))
-                .arg(
-                    Arg::new("anthropic")
-                        .long("anthropic-upstream")
-                        .default_value("https://api.anthropic.com"),
-                )
-                .arg(
-                    Arg::new("openai")
-                        .long("openai-upstream")
-                        .default_value("https://api.openai.com"),
-                )
-                .arg(
-                    Arg::new("openrouter")
-                        .long("openrouter-upstream")
-                        .default_value("https://openrouter.ai/api"),
-                )
+                .arg(Arg::new("anthropic").long("anthropic-upstream"))
+                .arg(Arg::new("openai").long("openai-upstream"))
+                .arg(Arg::new("openrouter").long("openrouter-upstream"))
                 .arg(
                     Arg::new("no_proxy")
                         .long("no-proxy")
@@ -2202,7 +2190,6 @@ async fn run_agent_command(root: &Path, args: &ArgMatches, trace_enabled: bool) 
             "strict agent mode is unavailable because direct filesystem and network bypass prevention is not yet established",
         );
     }
-
     let mode = if args.get_flag("guard") {
         "Blindfold Guard active:"
     } else {
@@ -2265,9 +2252,9 @@ async fn run_agent_command(root: &Path, args: &ArgMatches, trace_enabled: bool) 
             "Claude interactive mode is not proven safe through Blindfold yet; use `blindfold run --guard claude -- -p ...` or `--no-proxy`",
         );
     }
-    if agent == "codex" && codex_uses_interactive_websocket_transport(&agent_args) {
+    if agent == "codex" && codex_uses_interactive_mode(&agent_args) {
         return fail(
-            "interactive Codex uses a WebSocket transport that Blindfold does not sanitize yet; use `blindfold run --guard codex -- exec ...`, `blindfold run --guard codex -- review`, or `--no-proxy`",
+            "interactive Codex terminal output is not captured and sanitized yet; use `blindfold run --guard codex -- exec ...`, `blindfold run --guard codex -- review`, or `--no-proxy`",
         );
     }
     if agent == "opencode" && opencode_uses_unproven_interactive_mode(&agent_args) {
@@ -2467,7 +2454,7 @@ fn write_sanitized_agent_output<W: Write>(
 fn sanitizes_managed_agent_output(agent: &str, args: &[String]) -> bool {
     match agent {
         "claude" => !claude_uses_interactive_mode(args),
-        "codex" => !codex_uses_interactive_websocket_transport(args),
+        "codex" => !codex_uses_interactive_mode(args),
         "opencode" => matches!(args.first().map(String::as_str), Some("run")),
         _ => false,
     }
@@ -2510,9 +2497,14 @@ fn agent_upstreams(agent: &str, args: &ArgMatches) -> Result<Vec<Upstream>, Exit
     let anthropic = args
         .get_one::<String>("anthropic")
         .map_or("https://api.anthropic.com", String::as_str);
+    let default_openai = if agent == "codex" {
+        "https://chatgpt.com/backend-api/codex"
+    } else {
+        "https://api.openai.com"
+    };
     let openai = args
         .get_one::<String>("openai")
-        .map_or("https://api.openai.com", String::as_str);
+        .map_or(default_openai, String::as_str);
     let openrouter = args
         .get_one::<String>("openrouter")
         .map_or("https://openrouter.ai/api", String::as_str);
@@ -2544,7 +2536,7 @@ fn configure_agent_command(
         }
         "codex" => {
             command.arg("-c");
-            command.arg(format!("openai_base_url=\"{proxy_origin}/openai/v1\""));
+            command.arg(format!("openai_base_url=\"{proxy_origin}/openai\""));
             command.args(agent_args);
         }
         "opencode" => {
@@ -2609,7 +2601,7 @@ fn codex_overrides_proxy(args: &[String]) -> bool {
         .any(|arg| arg.starts_with("--config=openai_base_url"))
 }
 
-fn codex_uses_interactive_websocket_transport(args: &[String]) -> bool {
+fn codex_uses_interactive_mode(args: &[String]) -> bool {
     !matches!(
         args.first().map(String::as_str),
         Some("exec" | "e" | "review")

@@ -105,7 +105,7 @@ pub(crate) fn run(root: &Path) -> DoctorReport {
             },
             Check {
                 label: "Codex compatibility",
-                outcome: check_agent_version("codex", &["--version"], "codex-cli"),
+                outcome: check_codex_guard_compatibility(),
             },
             Check {
                 label: "OpenCode command",
@@ -208,6 +208,16 @@ fn check_optional_command(command: &str) -> Outcome {
     match check_command(command) {
         Outcome::Fail(_) => Outcome::Info("not installed; this agent wrapper is unavailable"),
         outcome => outcome,
+    }
+}
+
+fn check_codex_guard_compatibility() -> Outcome {
+    match check_optional_command("codex") {
+        Outcome::Info(_) => Outcome::Info("not installed; compatibility not checked"),
+        Outcome::Fail(message) => Outcome::Fail(message),
+        Outcome::Pass(_) => {
+            Outcome::Pass("installed; HTTP and responses WebSocket Guard available")
+        }
     }
 }
 

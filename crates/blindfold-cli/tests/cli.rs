@@ -1180,12 +1180,12 @@ fn codex_wrapper_injects_one_run_base_url_override() -> Result<(), Box<dyn Error
     assert!(output.status.success(), "{}", stderr(&output));
     let arguments = fs::read_to_string(directory.path().join("agent-args"))?;
     assert!(arguments.contains("-c\nopenai_base_url=\"http://127.0.0.1:"));
-    assert!(arguments.contains("/openai/v1\"\nreview\n"));
+    assert!(arguments.contains("/openai\"\nreview\n"));
     Ok(())
 }
 
 #[test]
-fn interactive_codex_guard_refuses_unsupported_websocket_transport() -> Result<(), Box<dyn Error>> {
+fn interactive_codex_guard_refuses_uncaptured_terminal_mode() -> Result<(), Box<dyn Error>> {
     let directory = TestDirectory::new()?;
     let agent = fake_agent(directory.path())?;
     let output = blindfold(
@@ -1200,7 +1200,7 @@ fn interactive_codex_guard_refuses_unsupported_websocket_transport() -> Result<(
     )?;
 
     assert!(!output.status.success());
-    assert!(stderr(&output).contains("WebSocket transport"));
+    assert!(stderr(&output).contains("terminal output"));
     assert!(!directory.path().join("agent-args").exists());
     Ok(())
 }
@@ -1404,7 +1404,7 @@ fn guarded_agent_modes_redact_requests_and_responses_to_fake_providers()
             response_mode: "codex",
             upstream_flag: "--openai-upstream",
             agent_args: &["exec", "hello"],
-            route_fragment: "/v1/responses",
+            route_fragment: "/responses",
         },
         AgentProviderCase {
             name: "codex-review-openai",
@@ -1413,7 +1413,7 @@ fn guarded_agent_modes_redact_requests_and_responses_to_fake_providers()
             response_mode: "codex",
             upstream_flag: "--openai-upstream",
             agent_args: &["review"],
-            route_fragment: "/v1/responses",
+            route_fragment: "/responses",
         },
         AgentProviderCase {
             name: "opencode-openai",

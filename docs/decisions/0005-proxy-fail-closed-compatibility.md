@@ -19,8 +19,8 @@ variables being set.
 Guarded provider traffic must fail closed:
 
 - inspectable HTTP JSON and SSE requests may be forwarded only after sanitization;
-- unsupported transports such as WebSocket upgrade requests are rejected before the body
-  is forwarded;
+- allowlisted provider WebSocket text frames may be forwarded only after bounded
+  bidirectional sanitization; other upgrades and binary/raw frames fail closed;
 - unsupported content types are rejected unless the body is empty;
 - direct known-provider egress is blocked for proxy-aware clients; and
 - error bodies, traces, and logs must not include raw payloads, headers, query strings,
@@ -39,8 +39,9 @@ Modes without this proof must be documented as preview, degraded, or unsupported
 ## Consequences
 
 Some agent modes may be refused even if they appear configurable. This is preferable to
-claiming protection for a path Blindfold cannot inspect. Interactive Codex is one such
-case until WebSocket sanitization or a supported non-WebSocket transport is implemented.
+claiming protection for a path Blindfold cannot inspect. Codex 0.141 responses
+WebSockets are supported as of 2026-06-19, but interactive Codex remains blocked because
+its terminal stream is not captured and sanitized.
 
 Provider authentication credentials may still be sent to their intended provider as
 part of the authenticated provider request. Blindfold's guard promise is that project

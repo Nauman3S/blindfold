@@ -83,25 +83,26 @@ It does not change persistent configuration.
 
 - Claude receives an ephemeral `ANTHROPIC_BASE_URL`.
 - Codex receives an ephemeral `openai_base_url` CLI configuration override for
-  non-interactive `exec` and `review` runs. Interactive Codex currently uses a
-  WebSocket transport that Blindfold does not sanitize yet, so Guard fails closed for
-  that mode.
+  non-interactive `exec` and `review` runs. Blindfold bridges and sanitizes its
+  responses WebSocket text frames in both directions. Interactive Codex remains
+  blocked because its terminal output is not captured.
 - OpenCode receives an `OPENCODE_CONFIG_CONTENT` overlay for its OpenAI and Anthropic
   provider base URLs (`/openai/v1`, `/anthropic/v1`, and `/openrouter/v1`). Existing
   inline settings are retained.
 
 ## Compatibility Matrix
 
-`Proven` means an automated fake-upstream regression sends a raw fixture through the
-managed agent path and verifies that the provider receives only redacted content and
-that the agent receives a redacted response.
+`Proven` means automated fake-upstream regression coverage verifies redaction in both
+directions. Codex 0.141 additionally has a real installed-client verification showing a
+fake key replaced before provider delivery and recorded as payload-free `/websocket`
+trace metadata.
 
 | Agent mode | Provider route | Inspectable transport | Credential source | Status | Notes |
 |---|---|---|---|---|---|
 | `claude --print ...` / `claude -p ...` | Anthropic through `/anthropic/v1` | HTTP JSON; Anthropic SSE sanitization is supported by the proxy | Native Claude login/config; parent env credentials are stripped | Proven for HTTP JSON | Interactive Claude, resume, remote, worktree, plugin URL, and permission-bypass modes fail closed. |
-| `codex exec ...` | OpenAI through `/openai/v1` | HTTP JSON | Native Codex login/config; parent env credentials are stripped | Proven for HTTP JSON | Use this for guarded non-interactive Codex tasks. |
-| `codex review` | OpenAI through `/openai/v1` | HTTP JSON | Native Codex login/config; parent env credentials are stripped | Proven for HTTP JSON | Guard injects the base URL and fake-upstream coverage verifies request/response redaction. |
-| interactive `codex` | OpenAI WebSocket path | WebSocket | Native Codex login/config | Unsupported; fails closed | Blindfold refuses this mode before launch because WebSocket sanitization is not implemented. |
+| `codex exec ...` | ChatGPT Codex or explicit OpenAI-compatible upstream through `/openai` | Responses WebSocket text frames with HTTPS fallback | Native Codex login/config; parent env credentials are stripped | Proven with Codex 0.141 | Controlled fake-upstream tests and a real installed Codex run verify request redaction and payload-free replacement tracing. |
+| `codex review` | ChatGPT Codex or explicit OpenAI-compatible upstream through `/openai` | Responses WebSocket text frames with HTTPS fallback | Native Codex login/config; parent env credentials are stripped | Transport proven | Uses the same guarded WebSocket bridge as `codex exec`. |
+| interactive `codex` | Same provider transport | WebSocket | Native Codex login/config | Unsupported; fails closed | Provider transport is sanitized, but interactive terminal output is not captured. |
 | `opencode run ...` with OpenAI | OpenAI through `/openai/v1` | HTTP JSON | Native OpenCode login/config; parent env credentials are stripped | Proven for HTTP JSON | Current fake-upstream coverage exercises the OpenAI provider route. |
 | `opencode run ...` with Anthropic | Anthropic through `/anthropic/v1` | HTTP JSON; Anthropic SSE sanitization is supported by the proxy | Native OpenCode login/config; parent env credentials are stripped | Proven for HTTP JSON | Runtime config is injected and fake-upstream coverage verifies request/response redaction. |
 | `opencode run ...` with OpenRouter | OpenRouter through `/openrouter/v1` | OpenAI-compatible HTTP JSON | Native OpenCode login/config; parent env credentials are stripped | Proven for HTTP JSON | Route is configured through the OpenAI-compatible proxy path and covered by fake-upstream tests. |

@@ -19,7 +19,12 @@ use axum::{
 };
 use blindfold_proxy::{Config, ExactValueSanitizer, Provider, Proxy, TraceSink, Upstream};
 use blindfold_trace::Record;
-use tokio::{net::TcpListener, sync::oneshot};
+use futures_util::{SinkExt, StreamExt};
+use tokio::{
+    net::TcpListener,
+    sync::{mpsc, oneshot},
+};
+use tokio_tungstenite::{accept_async, connect_async, tungstenite::Message as WsMessage};
 use tokio_util::sync::CancellationToken;
 
 const SECRET: &str = "raw-secret-value";
@@ -155,6 +160,47 @@ async fn provider_authentication_header_is_forwarded_to_allowlisted_upstream()
     );
     proxy_stop.cancel();
     let _ = upstream_stop.send(());
+    Ok(())
+}
+
+#[tokio::test]
+async fn websocket_frames_are_sanitized_in_both_directions()
+-> Result<(), Box<dyn std::error::Error>> {
+    let listener = TcpListener::bind("127.0.0.1:0").await?;
+    let upstream_address = listener.local_addr()?;
+    let (capture_tx, mut capture_rx) = mpsc::channel(1);
+    tokio::spawn(async move {
+        let Ok((stream, _)) = listener.accept().await else {
+            return;
+        };
+        let Ok(mut socket) = accept_async(stream).await else {
+            return;
+        };
+        let Some(Ok(WsMessage::Text(text))) = socket.next().await else {
+            return;
+        };
+        let _ = capture_tx.send(text.to_string()).await;
+        let _ = socket
+            .send(WsMessage::Text(format!("echo {SECRET}").into()))
+            .await;
+    });
+    let (proxy, proxy_stop) = spawn_proxy(upstream_address, Provider::OpenAi).await?;
+
+    let websocket_url = proxy.replacen("http://", "ws://", 1) + "/openai/v1/responses";
+    let (mut client, _) = connect_async(websocket_url).await?;
+    client
+        .send(WsMessage::Text(format!("send {SECRET}").into()))
+        .await?;
+    let upstream_text = capture_rx.recv().await.ok_or("missing upstream frame")?;
+    assert!(!upstream_text.contains(SECRET));
+    assert!(upstream_text.contains("[REDACTED]"));
+    let Some(WsMessage::Text(client_text)) = client.next().await.transpose()? else {
+        return Err("missing client response frame".into());
+    };
+    assert!(!client_text.contains(SECRET));
+    assert!(client_text.contains("[REDACTED]"));
+
+    proxy_stop.cancel();
     Ok(())
 }
 

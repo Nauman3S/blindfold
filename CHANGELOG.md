@@ -52,6 +52,8 @@ project follows Semantic Versioning as described in
   request with bounded non-secret body input, redacted response output, trace preflight,
   and detailed payload-free tracing.
 - Loopback OpenAI-compatible and Anthropic-compatible application proxy.
+- Bounded, bidirectional WebSocket frame sanitization for Codex responses transport,
+  with payload-free byte and replacement trace metadata.
 - Fail-closed LLM proxy checks for sensitive URL paths, query parameters, and
   non-provider-authentication headers before upstream forwarding.
 - Unified-diff secret scanning.
@@ -77,8 +79,8 @@ project follows Semantic Versioning as described in
   safe; documented examples use `opencode run ...`.
 - Claude interactive guard mode now fails closed; guarded Claude requires explicit
   `--print`/`-p`.
-- Proxy upgrade/WebSocket requests now fail closed with a safe `unsupported_transport`
-  error before any request body is forwarded.
+- Unsupported upgrade transports fail closed before forwarding; allowlisted provider
+  WebSocket text frames are now sanitized in both directions.
 - Traced agent sessions now explicitly report unmediated direct filesystem access
   instead of implying the whole session is protected.
 - Managed coding-agent wrappers no longer inherit the parent secret environment.

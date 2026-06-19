@@ -13,7 +13,8 @@ use std::{
 use axum::{
     Router,
     body::{Body, to_bytes},
-    extract::{Path, State},
+    extract::ws::{Message as LocalWsMessage, WebSocket, WebSocketUpgrade},
+    extract::{FromRequestParts, Path, State},
     http::{
         HeaderMap, HeaderName, HeaderValue, Method, Request, Response, Uri,
         header::{CONNECTION, CONTENT_LENGTH, CONTENT_TYPE, HOST, TRANSFER_ENCODING, UPGRADE},
@@ -21,10 +22,14 @@ use axum::{
     response::IntoResponse,
     routing::any,
 };
-use futures_util::StreamExt;
+use futures_util::{SinkExt, StreamExt};
 use reqwest::Url;
 use serde_json::Value;
 use tokio::net::TcpListener;
+use tokio_tungstenite::{
+    connect_async,
+    tungstenite::{Message as UpstreamWsMessage, client::IntoClientRequest},
+};
 use tokio_util::sync::CancellationToken;
 
 use blindfold_trace::{Category, Coverage, Issue, Outcome, Record, Replacement, Route};
@@ -194,6 +199,9 @@ async fn forward(
         return ProxyError::new(ErrorCode::UpstreamNotAllowed).into_response();
     };
     let mut trace = RequestTrace::new(upstream.provider);
+    if is_websocket_upgrade(request.headers()) {
+        return forward_websocket(state, upstream_name, path, request, trace).await;
+    }
     match tokio::time::timeout(
         state.request_timeout,
         forward_inner(&state, &upstream_name, &path, request, &mut trace),
@@ -214,6 +222,198 @@ async fn forward(
             ProxyError::new(ErrorCode::Timeout).into_response()
         }
     }
+}
+
+async fn forward_websocket(
+    state: AppState,
+    upstream_name: String,
+    path: String,
+    request: Request<Body>,
+    mut trace: RequestTrace,
+) -> Response<Body> {
+    let result = forward_websocket_inner(&state, &upstream_name, &path, request).await;
+    match result {
+        Ok((upgrade, upstream)) => {
+            let sanitizer = Arc::clone(&state.sanitizer);
+            let request_limit = state.max_request_body;
+            let response_limit = state.max_response_body;
+            let trace_sink = state.trace_sink.clone();
+            upgrade
+                .on_upgrade(move |local| async move {
+                    bridge_websockets(
+                        local,
+                        upstream,
+                        sanitizer,
+                        request_limit,
+                        response_limit,
+                        &mut trace,
+                    )
+                    .await;
+                    trace.emit(trace_sink.as_deref(), None);
+                })
+                .into_response()
+        }
+        Err(error) => {
+            trace.emit(state.trace_sink.as_deref(), Some(error.code()));
+            error.into_response()
+        }
+    }
+}
+
+async fn forward_websocket_inner(
+    state: &AppState,
+    upstream_name: &str,
+    path: &str,
+    request: Request<Body>,
+) -> Result<
+    (
+        WebSocketUpgrade,
+        tokio_tungstenite::WebSocketStream<
+            tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+        >,
+    ),
+    ProxyError,
+> {
+    let upstream = state
+        .upstreams
+        .get(upstream_name)
+        .ok_or_else(|| ProxyError::new(ErrorCode::UpstreamNotAllowed))?;
+    reject_sensitive_request_metadata(request.uri(), request.headers(), state.sanitizer.as_ref())?;
+    let original_headers = request.headers().clone();
+    let original_uri = request.uri().clone();
+    let (mut parts, _) = request.into_parts();
+    let upgrade = WebSocketUpgrade::from_request_parts(&mut parts, &())
+        .await
+        .map_err(|_| ProxyError::new(ErrorCode::UnsupportedTransport))?;
+    let mut destination = destination_url(&upstream.base_url, path, &original_uri);
+    destination
+        .set_scheme(if destination.scheme() == "https" {
+            "wss"
+        } else {
+            "ws"
+        })
+        .map_err(|()| ProxyError::new(ErrorCode::UnsupportedTransport))?;
+    let mut upstream_request = destination
+        .as_str()
+        .into_client_request()
+        .map_err(|_| ProxyError::new(ErrorCode::UnsupportedTransport))?;
+    for (name, value) in &original_headers {
+        if !is_websocket_handshake_header(name) && !is_hop_by_hop(name) {
+            upstream_request.headers_mut().insert(name, value.clone());
+        }
+    }
+    let (upstream_socket, _) = match connect_async(upstream_request).await {
+        Ok(connection) => connection,
+        Err(tokio_tungstenite::tungstenite::Error::Http(response)) => {
+            eprintln!(
+                "Blindfold: upstream WebSocket handshake failed with status {}",
+                response.status().as_u16()
+            );
+            return Err(ProxyError::new(ErrorCode::UpstreamFailure));
+        }
+        Err(_) => return Err(ProxyError::new(ErrorCode::UpstreamFailure)),
+    };
+    Ok((upgrade, upstream_socket))
+}
+
+async fn bridge_websockets(
+    mut local: WebSocket,
+    mut upstream: tokio_tungstenite::WebSocketStream<
+        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+    >,
+    sanitizer: Arc<dyn Sanitizer>,
+    request_limit: usize,
+    response_limit: usize,
+    trace: &mut RequestTrace,
+) {
+    loop {
+        tokio::select! {
+            local_message = local.recv() => {
+                let Some(Ok(message)) = local_message else { break };
+                match forward_local_ws_message(message, &mut upstream, sanitizer.as_ref(), request_limit).await {
+                    Ok((before, after, observations)) => {
+                        trace.request_before = trace.request_before.saturating_add(before);
+                        trace.request_after = trace.request_after.saturating_add(after);
+                        trace.observe(observations);
+                    }
+                    Err(()) => break,
+                }
+            }
+            upstream_message = upstream.next() => {
+                let Some(Ok(message)) = upstream_message else { break };
+                match forward_upstream_ws_message(message, &mut local, sanitizer.as_ref(), response_limit).await {
+                    Ok((before, after, observations)) => {
+                        trace.response_before = trace.response_before.saturating_add(before);
+                        trace.response_after = trace.response_after.saturating_add(after);
+                        trace.observe(observations);
+                    }
+                    Err(()) => break,
+                }
+            }
+        }
+    }
+}
+
+async fn forward_local_ws_message(
+    message: LocalWsMessage,
+    upstream: &mut tokio_tungstenite::WebSocketStream<
+        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+    >,
+    sanitizer: &dyn Sanitizer,
+    limit: usize,
+) -> Result<(usize, usize, Vec<Observation>), ()> {
+    let mut observations = Vec::new();
+    let mut sizes = (0, 0);
+    let message = match message {
+        LocalWsMessage::Text(text) if text.len() <= limit => {
+            sizes.0 = text.len();
+            let (safe, categories) = sanitizer.sanitize_traced(&text).into_parts();
+            sizes.1 = safe.len();
+            observations.extend(
+                categories
+                    .into_iter()
+                    .map(|category| Observation::new(category, "/websocket")),
+            );
+            UpstreamWsMessage::Text(safe.into())
+        }
+        LocalWsMessage::Ping(bytes) => UpstreamWsMessage::Ping(bytes),
+        LocalWsMessage::Pong(bytes) => UpstreamWsMessage::Pong(bytes),
+        LocalWsMessage::Close(_) => UpstreamWsMessage::Close(None),
+        LocalWsMessage::Text(_) | LocalWsMessage::Binary(_) => return Err(()),
+    };
+    upstream.send(message).await.map_err(|_| ())?;
+    Ok((sizes.0, sizes.1, observations))
+}
+
+async fn forward_upstream_ws_message(
+    message: UpstreamWsMessage,
+    local: &mut WebSocket,
+    sanitizer: &dyn Sanitizer,
+    limit: usize,
+) -> Result<(usize, usize, Vec<Observation>), ()> {
+    let mut observations = Vec::new();
+    let mut sizes = (0, 0);
+    let message = match message {
+        UpstreamWsMessage::Text(text) if text.len() <= limit => {
+            sizes.0 = text.len();
+            let (safe, categories) = sanitizer.sanitize_traced(&text).into_parts();
+            sizes.1 = safe.len();
+            observations.extend(
+                categories
+                    .into_iter()
+                    .map(|category| Observation::new(category, "/websocket")),
+            );
+            LocalWsMessage::Text(safe.into())
+        }
+        UpstreamWsMessage::Ping(bytes) => LocalWsMessage::Ping(bytes),
+        UpstreamWsMessage::Pong(bytes) => LocalWsMessage::Pong(bytes),
+        UpstreamWsMessage::Close(_) => LocalWsMessage::Close(None),
+        UpstreamWsMessage::Text(_) | UpstreamWsMessage::Binary(_) | UpstreamWsMessage::Frame(_) => {
+            return Err(());
+        }
+    };
+    local.send(message).await.map_err(|_| ())?;
+    Ok((sizes.0, sizes.1, observations))
 }
 
 async fn forward_inner(
@@ -324,6 +524,24 @@ fn reject_unsupported_method(method: &Method) -> Result<(), ProxyError> {
     } else {
         Ok(())
     }
+}
+
+fn is_websocket_upgrade(headers: &HeaderMap) -> bool {
+    headers
+        .get(UPGRADE)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| value.eq_ignore_ascii_case("websocket"))
+}
+
+fn is_websocket_handshake_header(name: &HeaderName) -> bool {
+    matches!(
+        name.as_str(),
+        "sec-websocket-key"
+            | "sec-websocket-version"
+            | "sec-websocket-extensions"
+            | "sec-websocket-protocol"
+            | "origin"
+    )
 }
 
 fn reject_sensitive_request_metadata(

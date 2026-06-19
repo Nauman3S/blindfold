@@ -1338,8 +1338,8 @@ protection boundary.
 - [~] `P6-06` Detect common bypass conditions such as direct provider configuration,
   unsupported agent version, unsupported transports, or unavailable hooks. Managed
   children now use an environment allowlist; credential brokering and version/hook
-  checks remain. Interactive Codex fails closed because its current transport is
-  WebSocket-based and not yet sanitizable by Blindfold.
+  checks remain. Codex responses WebSocket text frames are sanitized bidirectionally;
+  interactive Codex still fails closed because terminal output is not captured.
 - [x] `P6-07` Show startup status listing what is protected, degraded, or unprotected.
 - [x] `P6-08` Add `--strict` startup checks that refuse to run when required protections
   cannot be established.
@@ -1671,7 +1671,8 @@ repeatable evidence exists.
 Last local verification: 2026-06-19, implementation through `b408d97`. Formatting,
 strict Clippy, full workspace tests, release build, installed-agent fake-provider smoke,
 and manual broker trace smoke passed. Installed commands exercised by the smoke script:
-Claude Code 2.1.152, Codex CLI 0.139.0, and OpenCode 1.17.3.
+Claude Code 2.1.152, Codex CLI 0.141.0, and OpenCode 1.17.3. Real Codex verification
+recorded one `open_ai_api_key` replacement at `/websocket` before the provider request.
 
 | ID | Area | Verification | Pass condition | Evidence |
 |---|---|---|---|---|
@@ -1679,7 +1680,7 @@ Claude Code 2.1.152, Codex CLI 0.139.0, and OpenCode 1.17.3.
 | `V-02` | Formatting/lint | Formatter and linter | No failures | `cargo fmt --all`; `cargo clippy --workspace --all-targets --all-features -- -D warnings` |
 | `V-03` | Unit tests | Full unit suite | All tests pass | `cargo test --workspace --all-targets` |
 | `V-04` | Integration | CLI/config/vault/proxy/exec suites | All tests pass | `cargo test --workspace --all-targets`; 42 CLI and 13 proxy integration tests at latest verification |
-| `V-05` | End to end | Claude wrapper demo with fake provider | Demo succeeds; no raw fixture escapes | `scripts/manual_guard_smoke.sh`; covers Claude, Codex `exec`/`review`, and OpenCode OpenAI/Anthropic/OpenRouter |
+| `V-05` | End to end | Agent wrappers with fake providers plus real Codex transport | Demo succeeds; no raw fixture escapes | `scripts/manual_guard_smoke.sh` uses fake agent clients/providers; `cargo test -p blindfold-proxy websocket_frames_are_sanitized_in_both_directions`; real Codex CLI 0.141 run on 2026-06-19 recorded one `/websocket` replacement before provider delivery |
 | `V-06` | Leak regression | Search captured output, logs, audit, temp artifacts, and fake upstream traffic | Zero raw fixture matches | `cargo test --workspace --all-targets`; fake-upstream, broker, trace, exec, vault, and diff leak assertions |
 | `V-07` | Streaming | Split each fixture at every byte boundary supported by the detector | Every reconstruction is withheld/redacted | `cargo test -p blindfold-exec redacts_every_split_without_a_newline`; `cargo test -p blindfold-proxy split_sse_chunks_are_withheld_and_sanitized` |
 | `V-08` | Detector quality | Positive and false-positive corpora | Meets documented recall/false-positive budget | TBD |

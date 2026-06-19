@@ -260,7 +260,7 @@ curl http://127.0.0.1:8787/openai/chat/completions \
   -d '{"model":"example","messages":[{"role":"user","content":"inspect this text"}]}'
 ```
 
-The proxy sanitizes supported JSON and SSE textual fields, including nested tool
+The proxy sanitizes supported JSON, SSE, and WebSocket text fields, including nested tool
 arguments, rejects sensitive URL path/query values and non-provider credential headers,
 enforces body/time limits, rejects unsupported non-empty media types and proxy loops,
 and does not perform transparent TLS interception. Provider authentication headers
@@ -298,9 +298,10 @@ blindfold status
 blindfold deny domain api.example.com
 ```
 
-Interactive Claude and Codex modes are blocked until those transports are proven safe.
+Interactive Claude and Codex modes are blocked because their terminal streams are not
+captured and sanitized.
 Guarded Claude usage requires explicit `--print`/`-p`; guarded Codex usage is limited
-to non-interactive `exec` and `review` until its interactive transport is implemented.
+to non-interactive `exec` and `review`.
 
 Keep typing the native command names by activating shell wrappers:
 
