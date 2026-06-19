@@ -332,12 +332,25 @@ mod tests {
     use std::{
         error::Error,
         fs,
+        path::PathBuf,
+        sync::atomic::{AtomicU64, Ordering},
         time::{SystemTime, UNIX_EPOCH},
     };
 
     use super::{
         CONFIG_FILE, Config, ConfigError, ConfigOverride, MAX_CONFIG_BYTES, merge, read, validate,
     };
+
+    static NEXT_TEMP_PATH: AtomicU64 = AtomicU64::new(0);
+
+    fn config_test_path() -> Result<PathBuf, std::time::SystemTimeError> {
+        let nonce = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
+        let sequence = NEXT_TEMP_PATH.fetch_add(1, Ordering::Relaxed);
+        Ok(std::env::temp_dir().join(format!(
+            "blindfold-config-test-{}-{nonce}-{sequence}.yaml",
+            std::process::id()
+        )))
+    }
 
     #[test]
     fn defaults_are_valid_and_loopback_only() {
@@ -346,11 +359,7 @@ mod tests {
 
     #[test]
     fn rejects_oversized_config_without_echoing_contents() -> Result<(), Box<dyn Error>> {
-        let nonce = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
-        let path = std::env::temp_dir().join(format!(
-            "blindfold-config-test-{}-{nonce}.yaml",
-            std::process::id()
-        ));
+        let path = config_test_path()?;
         let sensitive_marker = "do-not-echo-this-marker";
         let mut contents = vec![b' '; MAX_CONFIG_BYTES + 1];
         contents[..sensitive_marker.len()].copy_from_slice(sensitive_marker.as_bytes());
@@ -369,11 +378,7 @@ mod tests {
 
     #[test]
     fn rejects_invalid_utf8_without_echoing_bytes() -> Result<(), Box<dyn Error>> {
-        let nonce = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
-        let path = std::env::temp_dir().join(format!(
-            "blindfold-config-test-{}-{nonce}.yaml",
-            std::process::id()
-        ));
+        let path = config_test_path()?;
         fs::write(&path, [0xff, 0xfe, 0xfd])?;
 
         let Err(error) = read::<Config>(&path, CONFIG_FILE) else {

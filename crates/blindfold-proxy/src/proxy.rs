@@ -233,6 +233,7 @@ async fn forward_inner(
     reject_unsupported_transport(request.headers())?;
     reject_unsupported_method(request.method())?;
     reject_oversize_content_length(request.headers(), state.max_request_body)?;
+    reject_sensitive_request_metadata(request.uri(), request.headers(), state.sanitizer.as_ref())?;
 
     let (parts, body) = request.into_parts();
     let body = to_bytes(body, state.max_request_body)
@@ -323,6 +324,69 @@ fn reject_unsupported_method(method: &Method) -> Result<(), ProxyError> {
     } else {
         Ok(())
     }
+}
+
+fn reject_sensitive_request_metadata(
+    uri: &Uri,
+    headers: &HeaderMap,
+    sanitizer: &dyn Sanitizer,
+) -> Result<(), ProxyError> {
+    if sanitizer.sanitize(uri.path()) != uri.path() {
+        return Err(ProxyError::new(ErrorCode::SensitiveMetadata));
+    }
+    if let Some(query) = uri.query() {
+        for (name, value) in url::form_urlencoded::parse(query.as_bytes()) {
+            if is_credential_query_name(&name)
+                || sanitizer.sanitize(&name) != name
+                || sanitizer.sanitize(&value) != value
+            {
+                return Err(ProxyError::new(ErrorCode::SensitiveMetadata));
+            }
+        }
+    }
+    for (name, value) in headers {
+        if is_hop_by_hop(name) || is_provider_auth_header(name) {
+            continue;
+        }
+        if is_credential_header_name(name) {
+            return Err(ProxyError::new(ErrorCode::SensitiveMetadata));
+        }
+        let value = value
+            .to_str()
+            .map_err(|_| ProxyError::new(ErrorCode::SensitiveMetadata))?;
+        if sanitizer.sanitize(value) != value {
+            return Err(ProxyError::new(ErrorCode::SensitiveMetadata));
+        }
+    }
+    Ok(())
+}
+
+fn is_provider_auth_header(name: &HeaderName) -> bool {
+    matches!(name.as_str(), "authorization" | "x-api-key" | "api-key")
+}
+
+fn is_credential_header_name(name: &HeaderName) -> bool {
+    let name = name.as_str();
+    matches!(
+        name,
+        "x-auth-token" | "x-access-token" | "x-api-token" | "x-client-secret" | "x-secret"
+    ) || name.ends_with("-token")
+        || name.ends_with("-secret")
+}
+
+fn is_credential_query_name(name: &str) -> bool {
+    matches!(
+        name.to_ascii_lowercase().as_str(),
+        "key"
+            | "api_key"
+            | "apikey"
+            | "token"
+            | "access_token"
+            | "secret"
+            | "client_secret"
+            | "password"
+            | "authorization"
+    )
 }
 
 fn reject_unsupported_transport(headers: &HeaderMap) -> Result<(), ProxyError> {
@@ -499,7 +563,9 @@ const fn issue_for(code: ErrorCode, source: BodySource) -> Issue {
         ErrorCode::RequestTooLarge => Issue::RequestTooLarge,
         ErrorCode::ResponseTooLarge => Issue::ResponseTooLarge,
         ErrorCode::InvalidJson => Issue::InvalidPayload,
-        ErrorCode::InvalidRequest | ErrorCode::UnsupportedTransport => Issue::UnsupportedRequest,
+        ErrorCode::InvalidRequest
+        | ErrorCode::SensitiveMetadata
+        | ErrorCode::UnsupportedTransport => Issue::UnsupportedRequest,
         ErrorCode::Timeout | ErrorCode::Cancelled => Issue::Timeout,
         ErrorCode::UpstreamFailure => match source {
             BodySource::Request => Issue::UpstreamFailure,

@@ -52,6 +52,8 @@ project follows Semantic Versioning as described in
   request with bounded non-secret body input, redacted response output, trace preflight,
   and detailed payload-free tracing.
 - Loopback OpenAI-compatible and Anthropic-compatible application proxy.
+- Fail-closed LLM proxy checks for sensitive URL paths, query parameters, and
+  non-provider-authentication headers before upstream forwarding.
 - Unified-diff secret scanning.
 - MCP stdio JSON-RPC protection preview.
 - Dependency-free TypeScript application SDK preview.

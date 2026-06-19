@@ -10,7 +10,10 @@ use axum::{
     Router,
     body::{Body, Bytes, to_bytes},
     extract::State,
-    http::{HeaderValue, Request, Response, StatusCode, header::CONTENT_TYPE},
+    http::{
+        HeaderMap, HeaderValue, Request, Response, StatusCode,
+        header::{AUTHORIZATION, CONTENT_TYPE},
+    },
     response::IntoResponse,
     routing::post,
 };
@@ -24,6 +27,7 @@ const SECRET: &str = "raw-secret-value";
 #[derive(Clone, Default)]
 struct Capture {
     bodies: Arc<Mutex<Vec<Vec<u8>>>>,
+    headers: Arc<Mutex<Vec<HeaderMap>>>,
 }
 
 #[derive(Clone)]
@@ -71,6 +75,84 @@ async fn fake_upstream_never_receives_raw_openai_value() -> Result<(), Box<dyn s
     assert!(!response_text.contains(SECRET));
     assert!(response_text.contains("[REDACTED]"));
 
+    proxy_stop.cancel();
+    let _ = upstream_stop.send(());
+    Ok(())
+}
+
+#[tokio::test]
+async fn rejects_sensitive_path_query_and_custom_header_before_upstream()
+-> Result<(), Box<dyn std::error::Error>> {
+    let capture = Capture::default();
+    let (upstream, upstream_stop) = spawn_upstream(capture.clone(), openai_response()).await?;
+    let (proxy, proxy_stop) = spawn_proxy(upstream, Provider::OpenAi).await?;
+    let client = reqwest::Client::new();
+
+    let requests = [
+        client
+            .post(format!(
+                "{proxy}/openai/v1/chat/completions?api_key={SECRET}"
+            ))
+            .header(CONTENT_TYPE, "application/json"),
+        client
+            .post(format!("{proxy}/openai/v1/chat/completions"))
+            .header(CONTENT_TYPE, "application/json")
+            .header("x-client-secret", SECRET),
+        client
+            .post(format!("{proxy}/openai/v1/{SECRET}"))
+            .header(CONTENT_TYPE, "application/json"),
+    ];
+    for request in requests {
+        let response = request.body(r#"{"model":"test-model"}"#).send().await?;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let text = response.text().await?;
+        assert!(text.contains("sensitive_metadata"));
+        assert!(!text.contains(SECRET));
+    }
+
+    assert!(
+        capture
+            .bodies
+            .lock()
+            .map_err(|_| "capture poisoned")?
+            .is_empty()
+    );
+    assert!(
+        capture
+            .headers
+            .lock()
+            .map_err(|_| "capture poisoned")?
+            .is_empty()
+    );
+    proxy_stop.cancel();
+    let _ = upstream_stop.send(());
+    Ok(())
+}
+
+#[tokio::test]
+async fn provider_authentication_header_is_forwarded_to_allowlisted_upstream()
+-> Result<(), Box<dyn std::error::Error>> {
+    let capture = Capture::default();
+    let (upstream, upstream_stop) = spawn_upstream(capture.clone(), openai_response()).await?;
+    let (proxy, proxy_stop) = spawn_proxy(upstream, Provider::OpenAi).await?;
+
+    reqwest::Client::new()
+        .post(format!("{proxy}/openai/v1/chat/completions"))
+        .header(CONTENT_TYPE, "application/json")
+        .header(AUTHORIZATION, format!("Bearer {SECRET}"))
+        .body(r#"{"model":"test-model"}"#)
+        .send()
+        .await?
+        .error_for_status()?;
+
+    let headers = capture.headers.lock().map_err(|_| "capture poisoned")?;
+    assert_eq!(headers.len(), 1);
+    assert_eq!(
+        headers[0]
+            .get(AUTHORIZATION)
+            .and_then(|value| value.to_str().ok()),
+        Some("Bearer raw-secret-value")
+    );
     proxy_stop.cancel();
     let _ = upstream_stop.send(());
     Ok(())
@@ -469,7 +551,11 @@ async fn capture_and_respond(
     State(state): State<UpstreamState>,
     request: Request<Body>,
 ) -> Response<Body> {
-    let Ok(body) = to_bytes(request.into_body(), 1024 * 1024).await else {
+    let (parts, body) = request.into_parts();
+    if let Ok(mut headers) = state.capture.headers.lock() {
+        headers.push(parts.headers);
+    }
+    let Ok(body) = to_bytes(body, 1024 * 1024).await else {
         return StatusCode::BAD_REQUEST.into_response();
     };
     if let Ok(mut bodies) = state.capture.bodies.lock() {

@@ -1240,6 +1240,9 @@ application base-URL routing cannot, without claiming impossible protection.
   `run`, OpenCode TUI/server mode, Claude, and Codex `exec`/`review`.
 - [ ] `P4C-08` Add negative tests for pinned cert failures, clients ignoring proxy env
   vars, unsupported HTTP/2/WebSocket cases, QUIC/UDP attempts, and raw TCP egress.
+- [x] `P4C-08A` Reject detected secrets and credential-named fields in LLM proxy URL
+  paths, query parameters, and non-provider-authentication headers before upstream
+  forwarding; explicitly preserve required provider authentication headers.
 - [ ] `P4C-09` Document that MITM mode does not protect against local file reads,
   clients that ignore proxy settings and are not blocked by egress controls,
   certificate pinning, QUIC unless blocked, raw sockets, or a malicious local process.

@@ -23,6 +23,8 @@ pub enum ErrorCode {
     InvalidJson,
     /// The request cannot be represented safely upstream.
     InvalidRequest,
+    /// A URL path, query, or non-provider-authentication header contains sensitive content.
+    SensitiveMetadata,
     /// The transport cannot be inspected by this application proxy.
     UnsupportedTransport,
     /// The upstream exchange exceeded its deadline.
@@ -42,6 +44,7 @@ impl ErrorCode {
             Self::ResponseTooLarge => "response_too_large",
             Self::InvalidJson => "invalid_json",
             Self::InvalidRequest => "invalid_request",
+            Self::SensitiveMetadata => "sensitive_metadata",
             Self::UnsupportedTransport => "unsupported_transport",
             Self::Timeout => "timeout",
             Self::Cancelled => "cancelled",
@@ -76,6 +79,7 @@ impl ProxyError {
             }
             ErrorCode::InvalidJson
             | ErrorCode::InvalidRequest
+            | ErrorCode::SensitiveMetadata
             | ErrorCode::UnsupportedTransport => StatusCode::BAD_REQUEST,
             ErrorCode::Timeout => StatusCode::GATEWAY_TIMEOUT,
             ErrorCode::Cancelled => StatusCode::SERVICE_UNAVAILABLE,
@@ -116,6 +120,7 @@ impl ErrorCode {
             Self::ResponseTooLarge => "upstream response is too large",
             Self::InvalidJson => "JSON or SSE payload could not be sanitized",
             Self::InvalidRequest => "request method or content type is unsupported",
+            Self::SensitiveMetadata => "request metadata contains sensitive content",
             Self::UnsupportedTransport => "request transport is unsupported and was not forwarded",
             Self::Timeout => "upstream exchange timed out",
             Self::Cancelled => "proxy exchange was cancelled",

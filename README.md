@@ -261,9 +261,11 @@ curl http://127.0.0.1:8787/openai/chat/completions \
 ```
 
 The proxy sanitizes supported JSON and SSE textual fields, including nested tool
-arguments, enforces body/time limits, rejects unsupported non-empty media types and
-proxy loops, and does not perform transparent TLS interception. Authentication headers
-are forwarded to the allowlisted upstream and must be managed by the caller.
+arguments, rejects sensitive URL path/query values and non-provider credential headers,
+enforces body/time limits, rejects unsupported non-empty media types and proxy loops,
+and does not perform transparent TLS interception. Provider authentication headers
+(`Authorization`, `x-api-key`, and `api-key`) are intentionally forwarded to the
+allowlisted upstream and must be managed by the caller.
 
 ## Coding Agent Wrappers
 
