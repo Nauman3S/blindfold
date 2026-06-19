@@ -89,7 +89,13 @@ pub(crate) async fn run() -> ExitCode {
             exec_command(args)
         }),
         Some(("call", args)) => {
-            traced_async_command(&root, trace_enabled, TraceRoute::Call, call_command(args)).await
+            traced_async_command(
+                &root,
+                trace_enabled,
+                TraceRoute::Call,
+                call_command(&root, args),
+            )
+            .await
         }
         Some(("policy", args)) => traced_command(&root, trace_enabled, TraceRoute::Policy, || {
             policy_command(args)
@@ -826,7 +832,7 @@ fn exec_command(args: &ArgMatches) -> ExitCode {
     }
 }
 
-async fn call_command(args: &ArgMatches) -> ExitCode {
+async fn call_command(root: &Path, args: &ArgMatches) -> ExitCode {
     let Some(secret_name) = args.get_one::<String>("secret") else {
         return fail("a secret name is required");
     };
@@ -848,6 +854,27 @@ async fn call_command(args: &ArgMatches) -> ExitCode {
     };
     if !matches!(url.scheme(), "http" | "https") {
         return fail("unsupported URL scheme");
+    }
+    let Some(host) = url.host_str() else {
+        return fail("URL host is required");
+    };
+    let policy = match EgressNetworkPolicy::load(root) {
+        Ok(policy) => policy,
+        Err(message) => return fail(message),
+    };
+    match policy.decision(host) {
+        EgressDecision::Allow => {}
+        EgressDecision::BlockKnownProvider => {
+            return fail("brokered HTTP call blocked: LLM provider domains must use the LLM proxy");
+        }
+        EgressDecision::BlockDenied => {
+            return fail("brokered HTTP call blocked: domain is denied for this project");
+        }
+        EgressDecision::BlockUnknown => {
+            return fail(
+                "brokered HTTP call blocked: unknown domain; use `blindfold allow domain <host>`",
+            );
+        }
     }
     let method = match args.get_one::<String>("method").map(String::as_str) {
         Some("POST") => reqwest::Method::POST,
@@ -1073,8 +1100,7 @@ fn save_project_network_policy(root: &Path, policy: &ProjectNetworkPolicy) -> Re
     let Some(parent) = path.parent() else {
         return Err("project network policy path is invalid".to_owned());
     };
-    fs::create_dir_all(parent)
-        .map_err(|error| format!("could not create policy directory: {}", error.kind()))?;
+    prepare_project_storage_dir(parent)?;
     let contents = serde_json::to_string_pretty(policy)
         .map_err(|_| "could not serialize project network policy".to_owned())?;
     let mut file = AtomicWriteFile::open(&path)
@@ -1087,6 +1113,31 @@ fn save_project_network_policy(root: &Path, policy: &ProjectNetworkPolicy) -> Re
 
 fn project_network_policy_path(root: &Path) -> PathBuf {
     root.join(".blindfold/network-policy.json")
+}
+
+fn prepare_project_storage_dir(path: &Path) -> Result<(), String> {
+    if path
+        .symlink_metadata()
+        .is_ok_and(|metadata| metadata.file_type().is_symlink())
+    {
+        return Err("project policy directory is unavailable".to_owned());
+    }
+    fs::create_dir_all(path)
+        .map_err(|error| format!("could not create policy directory: {}", error.kind()))?;
+    if path
+        .symlink_metadata()
+        .is_ok_and(|metadata| metadata.file_type().is_symlink())
+    {
+        return Err("project policy directory is unavailable".to_owned());
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+
+        fs::set_permissions(path, fs::Permissions::from_mode(0o700))
+            .map_err(|error| format!("could not secure policy directory: {}", error.kind()))?;
+    }
+    Ok(())
 }
 
 fn diff_command(root: &Path, args: &ArgMatches) -> ExitCode {

@@ -306,6 +306,7 @@ the response and safe metadata shown:
 
 ```sh
 export STRIPE_SECRET_KEY='sk_test_fake_blindfold_example_1234567890'
+blindfold allow domain api.stripe.com
 blindfold call --secret STRIPE_SECRET_KEY --url https://api.stripe.com/v1/customers
 ```
 
@@ -320,7 +321,8 @@ blindfold call \
 ```
 
 Blindfold sends the selected secret as `Authorization: Bearer ...`, redacts the
-response before printing it, and can trace the operation without storing payloads:
+response before printing it, enforces the project domain policy, and can trace the
+operation without storing payloads:
 
 ```sh
 blindfold call --trace --secret STRIPE_SECRET_KEY --url https://api.stripe.com/v1/customers

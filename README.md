@@ -159,13 +159,15 @@ should not see the token in output:
 
 ```sh
 export STRIPE_SECRET_KEY='sk_test_fake_blindfold_example_1234567890'
+blindfold allow domain api.stripe.com
 blindfold call --secret STRIPE_SECRET_KEY --url https://api.stripe.com/v1/customers
 ```
 
 Blindfold reads the named environment variable, sends it only as
-`Authorization: Bearer ...`, bounds the response body, redacts the selected value from
-the response, and records only payload-free trace metadata when `--trace` is enabled.
-This is a narrow broker, not a general HTTP client or transparent network proxy.
+`Authorization: Bearer ...`, applies the project domain allow/deny policy, bounds the
+response body, redacts the selected value from the response, and records only
+payload-free trace metadata when `--trace` is enabled. This is a narrow broker, not a
+general HTTP client or transparent network proxy.
 
 ## Check Policy Behavior
 

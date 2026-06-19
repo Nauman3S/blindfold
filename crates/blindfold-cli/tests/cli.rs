@@ -747,6 +747,8 @@ fn exec_injects_then_redacts_selected_secret() -> Result<(), Box<dyn Error>> {
 #[test]
 fn call_injects_bearer_secret_and_redacts_response() -> Result<(), Box<dyn Error>> {
     let directory = TestDirectory::new()?;
+    let allow = blindfold(directory.path(), &["allow", "domain", "127.0.0.1"])?;
+    assert!(allow.status.success(), "{}", stderr(&allow));
     let server = spawn_fake_call_server(format!("token={PROVIDER_FIXTURE}"))?;
     let output = Command::new(env!("CARGO_BIN_EXE_blindfold"))
         .args([
@@ -791,6 +793,28 @@ fn call_injects_bearer_secret_and_redacts_response() -> Result<(), Box<dyn Error
     let trace_output = stdout(&trace);
     assert!(trace_output.contains("activity: call"));
     assert!(!trace_output.contains(PROVIDER_FIXTURE));
+    Ok(())
+}
+
+#[test]
+fn call_blocks_unknown_domains_before_injecting_secret() -> Result<(), Box<dyn Error>> {
+    let directory = TestDirectory::new()?;
+    let output = Command::new(env!("CARGO_BIN_EXE_blindfold"))
+        .args([
+            "call",
+            "--secret",
+            "BLINDFOLD_CALL_TOKEN",
+            "--url",
+            "https://unknown.invalid/",
+        ])
+        .env("BLINDFOLD_CALL_TOKEN", PROVIDER_FIXTURE)
+        .current_dir(directory.path())
+        .output()?;
+
+    assert!(!output.status.success());
+    assert!(stderr(&output).contains("unknown domain"));
+    assert!(!stdout(&output).contains(PROVIDER_FIXTURE));
+    assert!(!stderr(&output).contains(PROVIDER_FIXTURE));
     Ok(())
 }
 
