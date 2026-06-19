@@ -1916,6 +1916,11 @@ async fn run_agent_command(root: &Path, args: &ArgMatches, trace_enabled: bool) 
             "interactive Codex uses a WebSocket transport that Blindfold does not sanitize yet; use `blindfold run --guard codex -- exec ...`, `blindfold run --guard codex -- review`, or `--no-proxy`",
         );
     }
+    if agent == "opencode" && opencode_uses_unproven_interactive_mode(&agent_args) {
+        return fail(
+            "OpenCode interactive/TUI mode is not proven safe through Blindfold yet; use `blindfold run --guard opencode -- run ...` or `--no-proxy`",
+        );
+    }
 
     let listen: SocketAddr = match "127.0.0.1:0".parse() {
         Ok(address) => address,
@@ -2254,6 +2259,10 @@ fn codex_uses_interactive_websocket_transport(args: &[String]) -> bool {
         args.first().map(String::as_str),
         Some("exec" | "e" | "review")
     )
+}
+
+fn opencode_uses_unproven_interactive_mode(args: &[String]) -> bool {
+    !matches!(args.first().map(String::as_str), Some("run"))
 }
 
 async fn run_native_agent(agent: &str, command: &str, args: &[String]) -> ExitCode {

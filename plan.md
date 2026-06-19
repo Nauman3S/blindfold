@@ -1330,18 +1330,18 @@ protection boundary.
   cannot be established.
 - [~] `P6-09` Add an end-to-end fake-agent test for `.env` SafeRefs, proxy sanitization,
   `blindfold exec`, and sanitized command output.
-- [~] `P6-11` Add per-agent fake-upstream compatibility tests for Claude, Codex
+- [x] `P6-11` Add per-agent fake-upstream compatibility tests for Claude, Codex
   `exec`/`review`, OpenCode `run`, and OpenCode TUI/server mode. Claude, Codex
-  `exec`, and OpenCode `run` now hit fake upstreams with redacted requests and receive
-  redacted responses; Codex `review`, OpenCode TUI/server, OpenRouter, and trace-safety
-  coverage remain.
+  `exec`/`review`, and OpenCode `run` for OpenAI, Anthropic, and OpenRouter now hit
+  fake upstreams with redacted requests, redacted responses, and no raw fixture in trace
+  storage. Interactive Codex and OpenCode TUI/server modes fail closed before launch.
 - [x] `P6-12` Add an agent/provider compatibility matrix to docs covering HTTP JSON,
   SSE, WebSocket, plugins, credential source, and known unsupported modes.
 - [x] `P6-10` Write the Claude Code quickstart, limitations, troubleshooting, and demo.
 
 **Exit criteria:**
 
-- [~] `blindfold run --guard claude|codex|opencode` launches only modes with proven
+- [x] `blindfold run --guard claude|codex|opencode` launches only modes with proven
   compatible provider traffic. Unsupported transports must fail closed and not forward
   request bodies.
 - [x] Guard mode blocks direct known-provider egress for proxy-aware clients.
@@ -1633,10 +1633,10 @@ boundary in the first screenful.
 - [x] Streaming sanitization catches a secret across every tested chunk boundary.
 - [x] `blindfold exec --secret NAME -- COMMAND` injects only approved values.
 - [x] Command stdout/stderr is sanitized while exit behavior is preserved.
-- [~] `blindfold run --guard opencode|claude|codex` completes the documented
+- [x] `blindfold run --guard opencode|claude|codex` completes the documented
   fake-provider demo without raw secrets reaching the fake provider for Claude, Codex
-  `exec`, and OpenCode `run`; remaining documented variants still need coverage.
-- [ ] Every documented guarded agent mode has a fake-upstream regression test proving
+  `exec`/`review`, and OpenCode `run` across OpenAI, Anthropic, and OpenRouter.
+- [x] Every documented guarded agent mode has a fake-upstream regression test proving
   request redaction, response redaction, trace safety, and fail-closed behavior for
   unsupported transports.
 - [x] Guard mode blocks direct known-provider egress for proxy-aware clients.

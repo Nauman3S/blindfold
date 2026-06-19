@@ -8,7 +8,7 @@ This is the short guide. You do not need to learn every Blindfold command.
 | --- | --- |
 | Start Codex with Blindfold Guard | `blindfold run --guard codex -- exec "summarize this repo"` |
 | Start Claude with Blindfold Guard | `blindfold run --guard claude` |
-| Start OpenCode with Blindfold Guard | `blindfold run --guard opencode` |
+| Start OpenCode with Blindfold Guard | `blindfold run --guard opencode -- run "inspect this repo"` |
 | Trace a command or agent session | `bf redact .env --trace` |
 | Inspect the latest trace | `bf trace tail` |
 | Temporarily run an agent without Blindfold | `blindfold run codex --no-proxy` |
@@ -86,7 +86,7 @@ you intentionally need the native environment for one run.
 
 ```sh
 blindfold run --guard claude
-blindfold run --guard opencode
+blindfold run --guard opencode -- run "inspect this repo"
 ```
 
 Examples with native arguments:
@@ -347,7 +347,7 @@ For most development sessions, this is enough:
 
 ```sh
 # Start your agent
-blindfold run --guard codex
+blindfold run --guard codex -- exec "summarize this repo"
 
 # Before committing
 blindfold diff-check
@@ -358,7 +358,7 @@ Or activate the shell wrapper once and continue using `codex` normally:
 
 ```sh
 eval "$(blindfold shell-init zsh)"
-codex
+codex exec "summarize this repo"
 ```
 
 ## What Blindfold Does Not Do Yet

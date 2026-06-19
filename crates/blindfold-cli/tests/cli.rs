@@ -144,8 +144,11 @@ when "codex"
   body = {{"input"=>"send #{{secret}}"}}
 when "opencode"
   config = JSON.parse(ENV.fetch("OPENCODE_CONFIG_CONTENT"))
-  uri = URI(config.fetch("provider").fetch("openai").fetch("options").fetch("baseURL") + "/chat/completions")
-  body = {{"messages"=>[{{"role"=>"user","content"=>"send #{{secret}}"}}]}}
+  provider = ARGV.include?("anthropic") ? "anthropic" : ARGV.include?("openrouter") ? "openrouter" : "openai"
+  base = config.fetch("provider").fetch(provider).fetch("options").fetch("baseURL")
+  path = provider == "anthropic" ? "/messages" : "/chat/completions"
+  uri = URI(base + path)
+  body = provider == "anthropic" ? {{"messages"=>[{{"role"=>"user","content"=>[{{"type"=>"text","text"=>"send #{{secret}}"}}]}}]}} : {{"messages"=>[{{"role"=>"user","content"=>"send #{{secret}}"}}]}}
 else
   raise "unknown fake mode"
 end
@@ -256,6 +259,16 @@ fn read_provider_request(
 
 fn find_header_end(buffer: &[u8]) -> Option<usize> {
     buffer.windows(4).position(|window| window == b"\r\n\r\n")
+}
+
+struct AgentProviderCase {
+    name: &'static str,
+    agent: &'static str,
+    agent_mode: &'static str,
+    response_mode: &'static str,
+    upstream_flag: &'static str,
+    agent_args: &'static [&'static str],
+    route_fragment: &'static str,
 }
 
 #[test]
@@ -407,8 +420,8 @@ fn traced_agent_session_reports_unmediated_file_reads() -> Result<(), Box<dyn Er
             "--agent-command",
             agent.to_str().ok_or("non-UTF-8 agent path")?,
             "--",
-            "exec",
-            "--version",
+            "run",
+            "trace-check",
         ])
         .current_dir(directory.path())
         .output()?;
@@ -436,6 +449,9 @@ fn traced_guard_records_payload_free_egress_decisions() -> Result<(), Box<dyn Er
             "--trace",
             "--agent-command",
             agent.to_str().ok_or("non-UTF-8 agent path")?,
+            "--",
+            "run",
+            "connect-check",
         ])
         .current_dir(directory.path())
         .output()?;
@@ -957,6 +973,27 @@ fn interactive_codex_guard_refuses_unsupported_websocket_transport() -> Result<(
 }
 
 #[test]
+fn interactive_opencode_guard_refuses_unproven_tui_mode() -> Result<(), Box<dyn Error>> {
+    let directory = TestDirectory::new()?;
+    let agent = fake_agent(directory.path())?;
+    let output = blindfold(
+        directory.path(),
+        &[
+            "run",
+            "--guard",
+            "opencode",
+            "--agent-command",
+            agent.to_str().ok_or("non-UTF-8 agent path")?,
+        ],
+    )?;
+
+    assert!(!output.status.success());
+    assert!(stderr(&output).contains("OpenCode interactive/TUI mode"));
+    assert!(!directory.path().join("agent-args").exists());
+    Ok(())
+}
+
+#[test]
 fn opencode_wrapper_merges_inline_config_and_routes_both_providers() -> Result<(), Box<dyn Error>> {
     let directory = TestDirectory::new()?;
     let agent = fake_agent(directory.path())?;
@@ -1031,64 +1068,94 @@ fn managed_noninteractive_agent_output_is_sanitized() -> Result<(), Box<dyn Erro
 #[test]
 fn guarded_agent_modes_redact_requests_and_responses_to_fake_providers()
 -> Result<(), Box<dyn Error>> {
-    for mode in ["claude", "codex", "opencode"] {
-        run_guarded_fake_provider_mode(mode)?;
+    for case in [
+        AgentProviderCase {
+            name: "claude-anthropic",
+            agent: "claude",
+            agent_mode: "claude",
+            response_mode: "claude",
+            upstream_flag: "--anthropic-upstream",
+            agent_args: &[],
+            route_fragment: "/v1/messages",
+        },
+        AgentProviderCase {
+            name: "codex-exec-openai",
+            agent: "codex",
+            agent_mode: "codex",
+            response_mode: "codex",
+            upstream_flag: "--openai-upstream",
+            agent_args: &["exec", "hello"],
+            route_fragment: "/v1/responses",
+        },
+        AgentProviderCase {
+            name: "codex-review-openai",
+            agent: "codex",
+            agent_mode: "codex",
+            response_mode: "codex",
+            upstream_flag: "--openai-upstream",
+            agent_args: &["review"],
+            route_fragment: "/v1/responses",
+        },
+        AgentProviderCase {
+            name: "opencode-openai",
+            agent: "opencode",
+            agent_mode: "opencode",
+            response_mode: "opencode",
+            upstream_flag: "--openai-upstream",
+            agent_args: &["run", "openai"],
+            route_fragment: "/v1/chat/completions",
+        },
+        AgentProviderCase {
+            name: "opencode-anthropic",
+            agent: "opencode",
+            agent_mode: "opencode",
+            response_mode: "claude",
+            upstream_flag: "--anthropic-upstream",
+            agent_args: &["run", "anthropic"],
+            route_fragment: "/v1/messages",
+        },
+        AgentProviderCase {
+            name: "opencode-openrouter",
+            agent: "opencode",
+            agent_mode: "opencode",
+            response_mode: "opencode",
+            upstream_flag: "--openrouter-upstream",
+            agent_args: &["run", "openrouter"],
+            route_fragment: "/v1/chat/completions",
+        },
+    ] {
+        run_guarded_fake_provider_case(&case)?;
     }
     Ok(())
 }
 
-fn run_guarded_fake_provider_mode(mode: &str) -> Result<(), Box<dyn Error>> {
+fn run_guarded_fake_provider_case(case: &AgentProviderCase) -> Result<(), Box<dyn Error>> {
     let directory = TestDirectory::new()?;
-    let provider = spawn_fake_provider(mode)?;
-    let agent = fake_provider_agent(directory.path(), mode)?;
+    let provider = spawn_fake_provider(case.response_mode)?;
+    let agent = fake_provider_agent(directory.path(), case.agent_mode)?;
     let agent_path = agent.to_str().ok_or("non-UTF-8 agent path")?;
-    let output = match mode {
-        "claude" => Command::new(env!("CARGO_BIN_EXE_blindfold"))
-            .args([
-                "run",
-                "--guard",
-                "claude",
-                "--anthropic-upstream",
-                &provider.upstream,
-                "--agent-command",
-                agent_path,
-            ])
-            .current_dir(directory.path())
-            .output()?,
-        "codex" => Command::new(env!("CARGO_BIN_EXE_blindfold"))
-            .args([
-                "run",
-                "--guard",
-                "codex",
-                "--openai-upstream",
-                &provider.upstream,
-                "--agent-command",
-                agent_path,
-                "--",
-                "exec",
-                "hello",
-            ])
-            .current_dir(directory.path())
-            .output()?,
-        "opencode" => Command::new(env!("CARGO_BIN_EXE_blindfold"))
-            .args([
-                "run",
-                "--guard",
-                "opencode",
-                "--openai-upstream",
-                &provider.upstream,
-                "--agent-command",
-                agent_path,
-                "--",
-                "run",
-                "hello",
-            ])
-            .current_dir(directory.path())
-            .output()?,
-        _ => unreachable!("fixed test modes"),
-    };
+    let output = Command::new(env!("CARGO_BIN_EXE_blindfold"))
+        .args([
+            "run",
+            "--guard",
+            "--trace",
+            case.agent,
+            case.upstream_flag,
+            &provider.upstream,
+            "--agent-command",
+            agent_path,
+            "--",
+        ])
+        .args(case.agent_args)
+        .current_dir(directory.path())
+        .output()?;
 
-    assert!(output.status.success(), "{mode}: {}", stderr(&output));
+    assert!(
+        output.status.success(),
+        "{}: {}",
+        case.name,
+        stderr(&output)
+    );
     let request = provider
         .request
         .recv_timeout(Duration::from_secs(5))
@@ -1096,7 +1163,8 @@ fn run_guarded_fake_provider_mode(mode: &str) -> Result<(), Box<dyn Error>> {
             let agent_response =
                 fs::read_to_string(directory.path().join("agent-response")).unwrap_or_default();
             format!(
-                "{mode}: fake provider did not receive request: {error}; stdout={}; stderr={}; agent_response={agent_response}",
+                "{}: fake provider did not receive request: {error}; stdout={}; stderr={}; agent_response={agent_response}",
+                case.name,
                 stdout(&output),
                 stderr(&output)
             )
@@ -1105,38 +1173,82 @@ fn run_guarded_fake_provider_mode(mode: &str) -> Result<(), Box<dyn Error>> {
         .done
         .join()
         .map_err(|_| "provider thread panicked")?;
+    assert_guarded_provider_request(case, &request);
+    assert_guarded_provider_outputs(case, directory.path(), &output)?;
+    Ok(())
+}
+
+fn assert_guarded_provider_request(case: &AgentProviderCase, request: &CapturedProviderRequest) {
     assert!(
-        request.request_line.contains("/v1/"),
-        "{mode}: unexpected upstream request line {}",
+        request.request_line.contains(case.route_fragment),
+        "{}: unexpected upstream request line {}",
+        case.name,
         request.request_line
     );
     assert!(
         !request.request_line.contains("/v1/v1/"),
-        "{mode}: duplicate upstream version path {}",
+        "{}: duplicate upstream version path {}",
+        case.name,
         request.request_line
     );
     assert!(
         !request.body.contains(PROVIDER_FIXTURE),
-        "{mode}: upstream body leaked raw fixture: {}",
+        "{}: upstream body leaked raw fixture: {}",
+        case.name,
         request.body
     );
     assert!(
         request.body.contains("[REDACTED:openai_api_key]"),
-        "{mode}: upstream body was not redacted: {}",
+        "{}: upstream body was not redacted: {}",
+        case.name,
         request.body
     );
-    let response = fs::read_to_string(directory.path().join("agent-response"))?;
+}
+
+fn assert_guarded_provider_outputs(
+    case: &AgentProviderCase,
+    directory: &Path,
+    output: &Output,
+) -> Result<(), Box<dyn Error>> {
+    let response = fs::read_to_string(directory.join("agent-response"))?;
     assert!(
         !response.contains(PROVIDER_FIXTURE),
-        "{mode}: agent response leaked raw fixture: {response}"
+        "{}: agent response leaked raw fixture: {response}",
+        case.name
     );
     assert!(
         response.contains("[REDACTED:openai_api_key]"),
-        "{mode}: agent response was not redacted: {response}"
+        "{}: agent response was not redacted: {response}",
+        case.name
     );
     assert!(
-        !stdout(&output).contains(PROVIDER_FIXTURE),
-        "{mode}: stdout leaked raw fixture"
+        !stdout(output).contains(PROVIDER_FIXTURE),
+        "{}: stdout leaked raw fixture",
+        case.name
+    );
+    let traces = blindfold(directory, &["trace", "list"])?;
+    assert!(
+        traces.status.success(),
+        "{}: {}",
+        case.name,
+        stderr(&traces)
+    );
+    let trace_output = stdout(&traces);
+    assert!(
+        trace_output.contains("route=run:") || trace_output.contains("route=proxy"),
+        "{}: missing trace records: {trace_output}",
+        case.name
+    );
+    assert!(
+        !trace_output.contains(PROVIDER_FIXTURE),
+        "{}: trace list leaked raw fixture",
+        case.name
+    );
+    let trace_file = fs::read_to_string(directory.join(".blindfold/trace.jsonl"))?;
+    assert!(
+        !trace_file.contains(PROVIDER_FIXTURE),
+        "{}: trace storage leaked raw fixture",
+        case.name
     );
     Ok(())
 }

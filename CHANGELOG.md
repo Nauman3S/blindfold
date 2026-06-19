@@ -38,6 +38,8 @@ project follows Semantic Versioning as described in
   guarded wrapper modes.
 - Captured stdout/stderr redaction for non-interactive guarded `codex exec`,
   `codex review`, and `opencode run` child processes.
+- Fake-upstream and trace-safety coverage for guarded `codex review`, OpenCode
+  Anthropic, and OpenCode OpenRouter routes.
 - Secret detectors, redaction modes, bounded repository scanning, and safe reports.
 - Destination-aware policy presets and scoped restoration decisions.
 - XChaCha20-Poly1305 local vault with safe audit metadata.
@@ -62,6 +64,8 @@ project follows Semantic Versioning as described in
   `/v1/v1` provider paths when the local proxy forwards agent requests.
 - Non-interactive guarded wrapper output now preserves the child exit code while
   redacting detected secrets from captured stdout/stderr.
+- OpenCode interactive/TUI guard mode now fails closed until that transport is proven
+  safe; documented examples use `opencode run ...`.
 - Proxy upgrade/WebSocket requests now fail closed with a safe `unsupported_transport`
   error before any request body is forwarded.
 - Traced agent sessions now explicitly report unmediated direct filesystem access
