@@ -2811,6 +2811,8 @@ const fn trace_category(kind: blindfold_detectors::SecretKind) -> TraceCategory 
         blindfold_detectors::SecretKind::OAuthToken => TraceCategory::OAuthToken,
         blindfold_detectors::SecretKind::PemPrivateKey => TraceCategory::PemPrivateKey,
         blindfold_detectors::SecretKind::CredentialUrl => TraceCategory::CredentialUrl,
+        blindfold_detectors::SecretKind::EmailAddress => TraceCategory::EmailAddress,
+        blindfold_detectors::SecretKind::PhoneNumber => TraceCategory::PhoneNumber,
         blindfold_detectors::SecretKind::Password => TraceCategory::Password,
         blindfold_detectors::SecretKind::ApiKey => TraceCategory::ApiKey,
         blindfold_detectors::SecretKind::Token => TraceCategory::Token,

@@ -110,6 +110,10 @@ pub enum SecretKind {
     PemPrivateKey,
     /// URL containing user information with a password.
     CredentialUrl,
+    /// RFC-valid email address.
+    EmailAddress,
+    /// Valid international phone number.
+    PhoneNumber,
     /// Password-like assignment.
     Password,
     /// API-key-like assignment not recognized as a known provider format.
@@ -135,6 +139,8 @@ impl SecretKind {
             Self::OAuthToken => "oauth_token",
             Self::PemPrivateKey => "pem_private_key",
             Self::CredentialUrl => "credential_url",
+            Self::EmailAddress => "email_address",
+            Self::PhoneNumber => "phone_number",
             Self::Password => "password",
             Self::ApiKey => "api_key",
             Self::Token => "token",

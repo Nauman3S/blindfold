@@ -400,7 +400,9 @@ fn redact_trace_names_dotenv_variable_without_value() -> Result<(), Box<dyn Erro
     let raw = "postgresql://blindfold_fake:BLINDFOLD_FAKE_FIXTURE@127.0.0.1:55432/blindfold_test";
     fs::write(
         directory.path().join("application.env"),
-        format!("APP_ENV=test\nDATABASE_URL={raw}\n"),
+        format!(
+            "APP_ENV=test\nDATABASE_URL={raw}\nREDIS_URL=redis://:cache-pass@127.0.0.1:6379/0\nSMTP_URL=smtps://fixture@example.com:mail-pass@mail.example.com:465\nCUSTOMER_EMAIL=ada.fixture@example.com\nCUSTOMER_PHONE=+1-202-555-0142\n"
+        ),
     )?;
 
     let redact = blindfold(directory.path(), &["redact", "--trace", "application.env"])?;
@@ -414,8 +416,18 @@ fn redact_trace_names_dotenv_variable_without_value() -> Result<(), Box<dyn Erro
     assert!(tail.status.success(), "{}", stderr(&tail));
     assert!(output.contains("credential_url"));
     assert!(output.contains("/env/DATABASE_URL"));
+    assert!(output.contains("/env/REDIS_URL"));
+    assert!(output.contains("/env/SMTP_URL"));
+    assert!(output.contains("email_address"));
+    assert!(output.contains("/env/CUSTOMER_EMAIL"));
+    assert!(output.contains("phone_number"));
+    assert!(output.contains("/env/CUSTOMER_PHONE"));
     assert!(!output.contains(raw));
     assert!(!output.contains("BLINDFOLD_FAKE_FIXTURE@"));
+    assert!(!output.contains("cache-pass"));
+    assert!(!output.contains("mail-pass"));
+    assert!(!output.contains("ada.fixture@example.com"));
+    assert!(!output.contains("+1-202-555-0142"));
     Ok(())
 }
 

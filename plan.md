@@ -91,8 +91,9 @@ Blindfold is a local-first privacy and secrets boundary for AI coding agents.
 
 It aims to let Claude Code, Codex, Cursor, MCP tools, and custom agents work with real
 projects while reducing disclosure of detected credentials on explicitly managed
-outbound paths. Automatic PII discovery, arbitrary local file-read mediation, and
-whole-agent containment are not currently implemented.
+outbound paths. Automatic email and international-phone detection is implemented;
+broad semantic PII discovery, arbitrary local file-read mediation, and whole-agent
+containment are not currently implemented.
 
 The core idea:
 
@@ -380,7 +381,8 @@ Detection methods:
 4. Contextual detection around names like password, secret, token, api_key, client_secret.
 5. Structured parsers for .env, JSON, YAML, TOML, XML.
 6. PEM/private-key block detection.
-7. URL parser for database URLs.
+7. WHATWG URL parsing for credential-bearing database, cache, mail, and other URLs.
+8. RFC email validation and libphonenumber metadata for high-confidence PII.
 
 Important rule:
 
@@ -755,8 +757,8 @@ Storage:
 Regex:
   regex crate
 Secret rules:
-  implement Gitleaks-compatible subset
-  or shell out to gitleaks for MVP if needed
+  keep the streaming detector in-process and bounded
+  use pinned Gitleaks separately for repository/CI scans
 Testing:
   cargo test
   integration tests with fake agents
@@ -1013,7 +1015,7 @@ before implementing secret-handling behavior.
   Anthropic, GitHub, Stripe, Slack, AWS, bearer tokens, JWTs, and OAuth secrets.
 - [x] `P1-03` Implement PEM and private-key block detection.
 - [x] `P1-04` Parse and redact credential-bearing URLs without corrupting valid URL
-  structure.
+  structure. Uses `url` 2.5.8 and covers empty-user Redis URLs and SMTP/database URLs.
 - [~] `P1-05` Add structured parsers for `.env`, JSON, YAML, and TOML. `.env` catalog
   support exists; dedicated JSON/YAML/TOML structural transforms remain.
 - [x] `P1-06` Implement entropy plus secret-context detection; entropy alone must not
@@ -1025,6 +1027,9 @@ before implementing secret-handling behavior.
   2026-06-11.
 - [x] `P1-09` Ensure replacements preserve useful structure and never reveal a raw
   prefix or suffix that policy classifies as sensitive.
+- [x] `P1-16` Add high-confidence automatic PII detection for RFC-valid email addresses
+  and `+`-prefixed international phone numbers using `email_address` and
+  `rlibphonenumber`. Names, addresses, and semantic PII remain out of scope.
 - [x] `P1-10` Implement recursive scanning with ignore rules, symlink policy, file-size
   limits, binary-file handling, and no traversal outside the requested root.
 - [x] `P1-11` Implement `blindfold scan [PATH]` with text/JSON completeness metadata
@@ -1484,8 +1489,8 @@ assumptions, threats, mitigations, residual risks, and out-of-scope threats.
 ### Protected Assets
 
 - Raw credentials, tokens, private keys, certificates, and credential-bearing URLs
-- Caller-identified PII supplied to the preview SDK; automatic PII discovery remains
-  outside the implemented detector boundary
+- RFC-valid email addresses and valid `+`-prefixed international phone numbers detected
+  on managed paths; caller-identified additional PII supplied to the preview SDK
 - Vault encryption keys and SafeRef mappings
 - Policy and audit integrity
 - The user's expectation of which paths are protected
@@ -1668,19 +1673,22 @@ boundary in the first screenful.
 Use this table as the release evidence index. Replace remaining `TBD` entries when
 repeatable evidence exists.
 
-Last local verification: 2026-06-19, implementation through `b408d97`. Formatting,
-strict Clippy, full workspace tests, release build, installed-agent fake-provider smoke,
-and manual broker trace smoke passed. Installed commands exercised by the smoke script:
-Claude Code 2.1.152, Codex CLI 0.141.0, and OpenCode 1.17.3. Real Codex verification
-recorded one `open_ai_api_key` replacement at `/websocket` before the provider request.
+Last local verification: 2026-06-23. Formatting, strict Clippy, full all-feature
+workspace tests, release build, `cargo audit`, and `cargo deny check` passed. Installed
+Codex CLI 0.141.0 read the complete environment fixture through Guard; its model-visible
+tool result contained no raw URL passwords, email addresses, or phone number. The
+protected OpenAI WebSocket trace recorded `credential_url`, `email_address`, and
+`phone_number` replacements. The dependency audit also upgraded `quinn-proto` to
+0.11.15 for RUSTSEC-2026-0185 and rejected a candidate phone library with an
+unmaintained transitive dependency.
 
 | ID | Area | Verification | Pass condition | Evidence |
 |---|---|---|---|---|
 | `V-01` | Build | Clean debug and release builds | No warnings designated as errors; artifacts produced | `cargo build -p blindfold-cli`; `cargo build --release --workspace` |
 | `V-02` | Formatting/lint | Formatter and linter | No failures | `cargo fmt --all`; `cargo clippy --workspace --all-targets --all-features -- -D warnings` |
 | `V-03` | Unit tests | Full unit suite | All tests pass | `cargo test --workspace --all-targets` |
-| `V-04` | Integration | CLI/config/vault/proxy/exec suites | All tests pass | `cargo test --workspace --all-targets`; 42 CLI and 13 proxy integration tests at latest verification |
-| `V-05` | End to end | Agent wrappers with fake providers plus real Codex transport | Demo succeeds; no raw fixture escapes | `scripts/manual_guard_smoke.sh` uses fake agent clients/providers; `cargo test -p blindfold-proxy websocket_frames_are_sanitized_in_both_directions`; real Codex CLI 0.141 run on 2026-06-19 recorded one `/websocket` replacement before provider delivery |
+| `V-04` | Integration | CLI/config/vault/proxy/exec suites | All tests pass | `cargo test --workspace --all-features`; 42 CLI and 14 proxy integration tests at latest verification |
+| `V-05` | End to end | Agent wrappers with fake providers plus real Codex transport | Demo succeeds; no raw fixture escapes | `scripts/manual_guard_smoke.sh` uses fake agent clients/providers; `cargo test -p blindfold-proxy websocket_frames_are_sanitized_in_both_directions`; real Codex CLI 0.141 fixture run on 2026-06-23 recorded credential URL, email, and phone replacements at `/websocket` before provider delivery |
 | `V-06` | Leak regression | Search captured output, logs, audit, temp artifacts, and fake upstream traffic | Zero raw fixture matches | `cargo test --workspace --all-targets`; fake-upstream, broker, trace, exec, vault, and diff leak assertions |
 | `V-07` | Streaming | Split each fixture at every byte boundary supported by the detector | Every reconstruction is withheld/redacted | `cargo test -p blindfold-exec redacts_every_split_without_a_newline`; `cargo test -p blindfold-proxy split_sse_chunks_are_withheld_and_sanitized` |
 | `V-08` | Detector quality | Positive and false-positive corpora | Meets documented recall/false-positive budget | TBD |
@@ -1692,7 +1700,7 @@ recorded one `open_ai_api_key` replacement at `/websocket` before the provider r
 | `V-13` | Policy | Complete mode/destination/sensitivity matrix | Every case has expected deterministic action | `cargo test -p blindfold-policy complete_builtin_matrix_is_deterministic_and_matches_contract` |
 | `V-14` | SafeRef abuse | Forged, malformed, replayed, expired, and cross-project references | No unauthorized restoration | TBD |
 | `V-15` | Performance | Large repository, large file, and high-volume stream benchmarks | Meets recorded budgets without unbounded memory | TBD |
-| `V-16` | Dependencies | Vulnerability, license, and supply-chain checks | No unapproved critical/high issue or incompatible license | TBD |
+| `V-16` | Dependencies | Vulnerability, license, and supply-chain checks | No unapproved critical/high issue or incompatible license | `cargo audit`; `cargo deny check`; passed 2026-06-23 after upgrading `quinn-proto` to 0.11.15 and rejecting `phonenumber` because it pulled unmaintained `atomic-polyfill` |
 | `V-17` | Platforms | Clean install and demo on supported macOS/Linux matrix | All required platforms pass | TBD |
 | `V-18` | Documentation | Follow quickstart from a clean environment | Commands and stated behavior match release | README/`USE_CASES.md` command review plus `scripts/manual_guard_smoke.sh`; clean-environment install remains covered by V-17/P7-04 |
 
@@ -1758,7 +1766,7 @@ Track these explicitly; unresolved high-impact decisions block the affected phas
 | `R-04` | Risk | Vault/keychain behavior differs significantly by platform | P3 | Open |
 | `R-05` | Risk | Detector false positives make the default workflow unusable | P1 | Open |
 | `R-06` | Risk | Dependencies log or serialize sensitive payloads unexpectedly | P0-P7 | Open |
-| `R-07` | Risk | Automatic PII discovery is absent while older design examples imply it exists | P1/P10 | Open: claims narrowed; scope decision required |
+| `R-07` | Risk | Automatic PII coverage is narrower than older design examples imply | P1/P10 | Mitigated: email/international-phone support implemented; broader categories explicitly documented as unsupported |
 | `R-08` | Risk | Managed agents using environment-only provider credentials cannot authenticate without bypass | P6 | Open: `blindfold exec` and `blindfold call` cover scoped secret use, but provider credentials are not brokered into managed agent login |
 
 For each open item, add an owner, target date, decision link, and mitigation when the

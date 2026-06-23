@@ -18,11 +18,13 @@ This repository is pre-release software:
 
 - **Implemented:** scanning, redaction, policy evaluation, encrypted local vault,
   sanitized command execution, one-shot brokered HTTP calls, OpenAI/Anthropic
-  application proxy, diff scanning.
+  application proxy, diff scanning, credential-bearing URL parsing, and automatic
+  detection of RFC-valid email addresses and international phone numbers.
 - **Preview:** Claude, Codex, and OpenCode wrappers; MCP stdio transformer; TypeScript
   SDK.
 - **Not implemented:** OS keychain adapter, transparent network interception, filesystem
-  sandbox, automatic PII discovery, MCP network transports, Windows support.
+  sandbox, broad semantic PII discovery (names, addresses, national IDs), MCP network
+  transports, Windows support.
 
 Use fake credentials while evaluating the project.
 
@@ -340,9 +342,11 @@ records mark agent sessions as degraded with `direct_filesystem_unmediated`; onl
 traffic that passes through Blindfold's managed provider proxy is sanitized. Full
 file-read protection requires future filesystem mediation or sandboxing.
 
-Automatic PII detection is not implemented. The TypeScript SDK restores only PII values
-that the application explicitly supplies to it; this is not repository or traffic PII
-discovery.
+Automatic PII detection currently covers RFC-valid email addresses and valid,
+`+`-prefixed international phone numbers. Names, postal addresses, national IDs,
+account numbers, and semantic PII are not detected. The TypeScript SDK can additionally
+tokenize PII values explicitly supplied by an application; it does not broaden the
+automatic detector set.
 
 See [Coding agent wrappers](docs/coding-agents.md) for custom gateway examples and
 agent-specific routing behavior.

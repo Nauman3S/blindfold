@@ -9,12 +9,15 @@ repository.workspace = true
 
 [dependencies]
 blake3 = { version = "1.8.5", default-features = false, features = ["std"] }
+email_address = { version = "0.2.9", default-features = false }
 getrandom = "0.4.2"
 regex = { version = "1.12.4", default-features = false, features = [
     "perf",
     "std",
     "unicode-perl",
 ] }
+rlibphonenumber = "2.2.5"
+url = { version = "2.5.8", default-features = false, features = ["std"] }
 
 [lints]
 workspace = true

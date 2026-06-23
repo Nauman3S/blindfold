@@ -1,6 +1,9 @@
 use std::fmt;
+use std::str::FromStr;
 
+use email_address::EmailAddress;
 use regex::Regex;
+use url::Url;
 
 use crate::{Confidence, Finding, SecretKind, Span, resolve_overlaps};
 
@@ -110,13 +113,6 @@ impl KnownFormats {
                 Confidence::Certain,
                 "known.pem_private_key",
             ),
-            (
-                r"(?:^|[^A-Za-z0-9_])[A-Za-z][-A-Za-z0-9+.]{1,20}://[^/ \t\r\n:@]+:([^/@ \t\r\n]+)@[^/ \t\r\n]+",
-                1,
-                SecretKind::CredentialUrl,
-                Confidence::Certain,
-                "known.credential_url",
-            ),
         ];
 
         let mut patterns = Vec::with_capacity(specifications.len());
@@ -139,6 +135,126 @@ impl Detector for KnownFormats {
         for pattern in &self.patterns {
             pattern.detect(input, findings);
         }
+    }
+}
+
+struct StructuredDetector {
+    url: Regex,
+    email: Regex,
+    phone: Regex,
+}
+
+impl StructuredDetector {
+    fn new() -> Result<Self, BuildError> {
+        Ok(Self {
+            url: Regex::new(
+                r#"(?i)\b[A-Z][A-Z0-9+.-]{1,31}://[^\s<>"'`]+"#,
+            )
+            .map_err(|_| BuildError {
+                detector: "structured.credential_url",
+            })?,
+            email: Regex::new(
+                r"(?i)(?:^|[^A-Z0-9.!#$%&'*+?^_`{|}~-])([A-Z0-9.!#$%&'*+?^_`{|}~-]{1,64}@[A-Z0-9.-]{1,253}\.[A-Z]{2,63})(?:$|[^A-Z0-9.-])",
+            )
+            .map_err(|_| BuildError {
+                detector: "structured.email_address",
+            })?,
+            phone: Regex::new(r"(?:^|[^0-9+])((?:\+[1-9][0-9 .()-]{7,24}[0-9]))(?:$|[^0-9])")
+                .map_err(|_| BuildError {
+                    detector: "structured.phone_number",
+                })?,
+        })
+    }
+
+    fn detect_credential_urls(&self, input: &str, findings: &mut Vec<Finding>) {
+        for candidate in self.url.find_iter(input) {
+            let raw = candidate.as_str();
+            let Ok(parsed) = Url::parse(raw) else {
+                continue;
+            };
+            if parsed.password().is_none() {
+                continue;
+            }
+            let Some(authority_start) = raw.find("://").map(|index| index + 3) else {
+                continue;
+            };
+            let authority_end = raw[authority_start..]
+                .find(['/', '?', '#'])
+                .map_or(raw.len(), |index| authority_start + index);
+            let authority = &raw[authority_start..authority_end];
+            let Some(at) = authority.rfind('@') else {
+                continue;
+            };
+            let user_info = &authority[..at];
+            let Some(colon) = user_info.find(':') else {
+                continue;
+            };
+            if colon + 1 == user_info.len() {
+                continue;
+            }
+            let start = candidate.start() + authority_start + colon + 1;
+            let end = candidate.start() + authority_start + user_info.len();
+            let Ok(span) = Span::new(start, end) else {
+                continue;
+            };
+            findings.push(Finding::new(
+                SecretKind::CredentialUrl,
+                span,
+                Confidence::Certain,
+                "structured.credential_url",
+            ));
+        }
+    }
+
+    fn detect_emails(&self, input: &str, findings: &mut Vec<Finding>) {
+        for captures in self.email.captures_iter(input) {
+            let Some(candidate) = captures.get(1) else {
+                continue;
+            };
+            if EmailAddress::from_str(candidate.as_str()).is_err() {
+                continue;
+            }
+            let Ok(span) = Span::new(candidate.start(), candidate.end()) else {
+                continue;
+            };
+            findings.push(Finding::new(
+                SecretKind::EmailAddress,
+                span,
+                Confidence::High,
+                "structured.email_address",
+            ));
+        }
+    }
+
+    fn detect_phone_numbers(&self, input: &str, findings: &mut Vec<Finding>) {
+        for captures in self.phone.captures_iter(input) {
+            let Some(candidate) = captures.get(1) else {
+                continue;
+            };
+            let Ok(number) = rlibphonenumber::PhoneNumber::parse(candidate.as_str(), None) else {
+                continue;
+            };
+            if !number.is_valid() {
+                continue;
+            }
+            let Ok(span) = Span::new(candidate.start(), candidate.end()) else {
+                continue;
+            };
+            findings.push(Finding::new(
+                SecretKind::PhoneNumber,
+                span,
+                Confidence::High,
+                "structured.phone_number",
+            ));
+        }
+    }
+}
+
+impl Detector for StructuredDetector {
+    fn detect(&self, input: &str, findings: &mut Vec<Finding>) {
+        self.detect_credential_urls(input, findings);
+        self.detect_emails(input, findings);
+        self.detect_phone_numbers(input, findings);
     }
 }
 
@@ -301,6 +417,7 @@ impl DetectorSet {
         Ok(Self {
             detectors: vec![
                 Box::new(KnownFormats::new()?),
+                Box::new(StructuredDetector::new()?),
                 Box::new(ContextualDetector::new()?),
             ],
         })
@@ -426,6 +543,52 @@ mod tests {
         assert_eq!(findings.len(), 1);
         assert_eq!(findings[0].kind(), SecretKind::CredentialUrl);
         assert_eq!(&url[findings[0].span().as_range()], "s3cr3t-value");
+    }
+
+    #[test]
+    fn detects_passwords_in_database_cache_and_mail_urls() {
+        let input = concat!(
+            "DATABASE_URL=postgresql://service:db-pass@127.0.0.1/app\n",
+            "REDIS_URL=redis://:cache-pass@127.0.0.1/0\n",
+            "SMTP_URL=smtps://fixture@example.com:mail-pass@mail.example.com:465\n",
+        );
+        let findings = detectors().detect(input);
+        let values = findings
+            .iter()
+            .filter(|finding| finding.kind() == SecretKind::CredentialUrl)
+            .map(|finding| &input[finding.span().as_range()])
+            .collect::<Vec<_>>();
+        assert_eq!(values, ["db-pass", "cache-pass", "mail-pass"]);
+    }
+
+    #[test]
+    fn detects_valid_email_and_international_phone_number() {
+        let input = "CUSTOMER_EMAIL=ada.fixture@example.com\nCUSTOMER_PHONE=+1-202-555-0142";
+        let findings = detectors().detect(input);
+        assert!(findings.iter().any(|finding| {
+            finding.kind() == SecretKind::EmailAddress
+                && &input[finding.span().as_range()] == "ada.fixture@example.com"
+        }));
+        assert!(findings.iter().any(|finding| {
+            finding.kind() == SecretKind::PhoneNumber
+                && &input[finding.span().as_range()] == "+1-202-555-0142"
+        }));
+    }
+
+    #[test]
+    fn email_span_does_not_consume_url_delimiters() {
+        let input = "smtps://fixture@example.com:mail-pass@mail.example.com:465";
+        let findings = detectors().detect(input);
+        assert!(findings.iter().any(|finding| {
+            finding.kind() == SecretKind::EmailAddress
+                && &input[finding.span().as_range()] == "fixture@example.com"
+        }));
+    }
+
+    #[test]
+    fn structured_detectors_reject_near_misses() {
+        let input = "docs@example localhost user@localhost +1-000-000-0000 build-2026-06-23";
+        assert!(detectors().detect(input).is_empty());
     }
 
     #[test]

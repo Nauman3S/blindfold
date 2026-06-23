@@ -165,6 +165,10 @@ pub enum Category {
     PemPrivateKey,
     /// Credential-bearing URL password.
     CredentialUrl,
+    /// RFC-valid email address.
+    EmailAddress,
+    /// Valid international phone number.
+    PhoneNumber,
     /// Password-like value.
     Password,
     /// API-key-like value.
@@ -192,6 +196,8 @@ impl Category {
             Self::OAuthToken => "oauth_token",
             Self::PemPrivateKey => "pem_private_key",
             Self::CredentialUrl => "credential_url",
+            Self::EmailAddress => "email_address",
+            Self::PhoneNumber => "phone_number",
             Self::Password => "password",
             Self::ApiKey => "api_key",
             Self::Token => "token",

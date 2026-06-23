@@ -11,8 +11,8 @@ evidence is complete.
 For a supported operation that startup diagnostics report as protected, with valid
 policy and no bypass:
 
-- detected raw secrets are removed or blocked before managed LLM requests leave the
-  machine;
+- detected raw secrets and supported PII are removed or blocked before managed LLM
+  requests leave the machine;
 - detected raw secrets are removed or blocked before managed responses or tool output
   reach the agent;
 - Blindfold does not intentionally write raw values to its logs, traces, metrics labels,
@@ -54,3 +54,7 @@ Documentation and startup output must use these terms consistently:
 
 The project must not use absolute claims such as "secrets can never leak" or imply that
 future sandbox, filesystem mediation, or network egress controls already exist.
+
+Supported automatic PII means RFC-valid email addresses and valid `+`-prefixed
+international phone numbers. It does not include names, postal addresses, national
+identifiers, financial account numbers, or semantic inference.

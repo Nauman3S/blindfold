@@ -18,6 +18,11 @@ This is the short guide. You do not need to learn every Blindfold command.
 | Give one secret to a command | `blindfold exec --secret NAME -- command` |
 | Call one API with a secret | `blindfold call --secret NAME --url https://api.example.com` |
 
+The built-in redactor recognizes common provider keys, private keys, bearer/JWT/OAuth
+tokens, password-like assignments, passwords in database/Redis/SMTP URLs, RFC-valid
+email addresses, and valid `+`-prefixed international phone numbers. It does not detect
+every secret or every kind of personal data.
+
 ## First-Time Setup
 
 Build Blindfold and put it on your current shell's `PATH`:
