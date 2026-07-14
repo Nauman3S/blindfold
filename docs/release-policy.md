@@ -25,14 +25,26 @@ agree.
 A release requires:
 
 - all scope and phase criteria for that version complete;
-- formatting, Clippy, tests, release build, audit, deny, and secret scan passing;
+- Rust formatting, Clippy, workspace tests, rustdoc, release build, both SDK suites,
+  Python sdist/wheel build, audit, deny, and secret scan passing;
+- the managed runner fake-provider matrix and interactive-mode rejection smoke passing;
+- for every shipped harness adapter, manifest-version, harness-version, capability-gate,
+  and provider fake-upstream tests passing; external adapters additionally require
+  explicit-install and no-project-auto-load tests, and any declared tool event requires
+  hook-sanitization tests;
 - supported macOS and Linux installation and end-to-end evidence;
 - no raw fixture value in captured output, logs, audit, temporary artifacts, or fake
   upstream traffic;
 - no unresolved critical or high security issue without a written decision;
 - published managed-boundary limitations;
+- no claim of whole-agent containment while filesystem and direct-network mediation are
+  absent;
 - checksummed artifacts; and
 - a changelog entry and annotated `vX.Y.Z` tag.
+
+An adapter manifest cannot be release evidence for a control. Evidence must come from
+core-owned enforcement and end-to-end conformance tests. External adapter execution and
+native tool hooks must be described as unimplemented until their own evidence passes.
 
 Windows artifacts must not be published for `v0.1.0`.
 

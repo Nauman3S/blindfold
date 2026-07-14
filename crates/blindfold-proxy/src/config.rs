@@ -11,14 +11,13 @@ use reqwest::Url;
 
 const DEFAULT_MAX_REQUEST_BODY: usize = 1024 * 1024;
 const DEFAULT_MAX_RESPONSE_BODY: usize = 8 * 1024 * 1024;
-const DEFAULT_STREAM_OVERLAP: usize = 256;
 
 /// The supported JSON wire shape for an upstream.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Provider {
-    /// OpenAI-compatible request, response, and SSE objects.
+    /// OpenAI-compatible JSON and Responses WebSocket objects.
     OpenAi,
-    /// Anthropic-compatible request, response, and SSE objects.
+    /// Anthropic-compatible JSON and response SSE objects.
     Anthropic,
 }
 
@@ -76,8 +75,6 @@ pub struct Config {
     pub max_response_body: usize,
     /// End-to-end timeout for one upstream exchange.
     pub request_timeout: Duration,
-    /// Raw text retained at streaming boundaries.
-    pub stream_overlap: usize,
     /// Named upstream allowlist.
     pub upstreams: Vec<Upstream>,
 }
@@ -90,7 +87,6 @@ impl Default for Config {
             max_request_body: DEFAULT_MAX_REQUEST_BODY,
             max_response_body: DEFAULT_MAX_RESPONSE_BODY,
             request_timeout: Duration::from_secs(30),
-            stream_overlap: DEFAULT_STREAM_OVERLAP,
             upstreams: Vec::new(),
         }
     }
@@ -105,8 +101,6 @@ pub enum ConfigError {
     ZeroBodyLimit,
     /// The timeout must be non-zero.
     ZeroTimeout,
-    /// The configured stream overlap is too small for the sanitizer.
-    InsufficientStreamOverlap,
     /// No upstreams were configured.
     EmptyAllowlist,
     /// An upstream route name is empty or contains unsupported characters.
@@ -127,9 +121,6 @@ impl fmt::Display for ConfigError {
             Self::NonLoopbackBind => "non-loopback binding requires explicit opt-in",
             Self::ZeroBodyLimit => "request and response body limits must be non-zero",
             Self::ZeroTimeout => "request timeout must be non-zero",
-            Self::InsufficientStreamOverlap => {
-                "stream overlap is smaller than the sanitizer requirement"
-            }
             Self::EmptyAllowlist => "at least one upstream must be allowlisted",
             Self::InvalidUpstreamName => "an upstream name is invalid",
             Self::DuplicateUpstreamName => "upstream names must be unique",
@@ -143,7 +134,7 @@ impl fmt::Display for ConfigError {
 impl std::error::Error for ConfigError {}
 
 impl Config {
-    pub(crate) fn validate(&self, required_overlap: usize) -> Result<(), ConfigError> {
+    pub(crate) fn validate(&self) -> Result<(), ConfigError> {
         if !self.allow_non_loopback && !self.bind_addr.ip().is_loopback() {
             return Err(ConfigError::NonLoopbackBind);
         }
@@ -152,9 +143,6 @@ impl Config {
         }
         if self.request_timeout.is_zero() {
             return Err(ConfigError::ZeroTimeout);
-        }
-        if self.stream_overlap < required_overlap {
-            return Err(ConfigError::InsufficientStreamOverlap);
         }
         if self.upstreams.is_empty() {
             return Err(ConfigError::EmptyAllowlist);

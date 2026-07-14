@@ -19,12 +19,15 @@ This repository is pre-release software:
 - **Implemented:** scanning, redaction, policy evaluation, encrypted local vault,
   sanitized command execution, one-shot brokered HTTP calls, OpenAI/Anthropic
   application proxy, diff scanning, credential-bearing URL parsing, and automatic
-  detection of RFC-valid email addresses and international phone numbers.
-- **Preview:** Claude, Codex, and OpenCode wrappers; MCP stdio transformer; TypeScript
-  SDK.
+  detection of RFC-valid email addresses and international phone numbers. The strict
+  TOML adapter-manifest API, explicit-directory plugin loader, and exact harness
+  version probes are also implemented.
+- **Preview:** constrained noninteractive Claude, Codex, and OpenCode wrappers; MCP
+  stdio transformer; Python and TypeScript SDKs.
 - **Not implemented:** OS keychain adapter, transparent network interception, filesystem
   sandbox, broad semantic PII discovery (names, addresses, national IDs), MCP network
-  transports, Windows support.
+  transports, Windows support, external adapter execution, and native harness
+  pre/post-tool hook injection.
 
 Use fake credentials while evaluating the project.
 
@@ -54,14 +57,14 @@ blindfold --help
 ```sh
 blindfold init
 blindfold doctor
-blindfold run --guard codex -- exec "summarize this repo"
+blindfold run codex -- exec "summarize this repo"
 ```
 
 Common tasks and copy-paste examples are in [USE_CASES.md](USE_CASES.md).
-`doctor` validates the configuration and reports installed Claude, Codex, and OpenCode
-compatibility status without printing command paths or secrets. Most runtime commands
-still use CLI defaults and flags; runtime configuration integration remains preview
-work.
+`doctor` validates the configuration, installed-command presence, and embedded harness
+contracts without executing agent binaries or printing command paths or secrets. Exact
+version compatibility is checked at `bf run` startup. Most runtime commands still use
+CLI defaults and flags; runtime configuration integration remains preview work.
 
 ## Scan Files and Directories
 
@@ -132,6 +135,22 @@ DATABASE_URL=${DATABASE_URL}
 
 `block` returns a failure instead of printing transformed input when sensitive content
 is found.
+
+## Mask Content With SafeRefs
+
+Masking stores detected values in the encrypted local vault and writes opaque,
+session-scoped references:
+
+```sh
+export BLINDFOLD_MASTER_KEY="$(openssl rand -hex 32)"
+blindfold mask .env --ttl-seconds 3600
+blindfold mask config.json --output config.masked.json
+```
+
+Equal values reuse one SafeRef within the invocation. Email and phone findings use PII
+references, PEM values use private-key references, and all other detected values use
+secret references. Output replacement follows the same create-new/explicit-`--force`
+rules as `redact`.
 
 ## Run a Command with Secrets
 
@@ -262,34 +281,33 @@ curl http://127.0.0.1:8787/openai/chat/completions \
   -d '{"model":"example","messages":[{"role":"user","content":"inspect this text"}]}'
 ```
 
-The proxy sanitizes supported JSON, SSE, and WebSocket text fields, including nested tool
-arguments, rejects sensitive URL path/query values and non-provider credential headers,
-enforces body/time limits, rejects unsupported non-empty media types and proxy loops,
-and does not perform transparent TLS interception. Provider authentication headers
-(`Authorization`, `x-api-key`, and `api-key`) are intentionally forwarded to the
-allowlisted upstream and must be managed by the caller.
+The proxy accepts JSON POST bodies and sanitizes every string value, including nested
+tool arguments. The only streaming exceptions are bounded Anthropic response SSE and
+JSON-object text frames on the OpenAI Responses WebSocket endpoint. SSE requests,
+OpenAI SSE, binary or arbitrary WebSockets, unsupported non-empty media types, sensitive
+URL/query values, proxy loops, and other HTTP methods fail closed. Provider
+authentication headers (`Authorization`, `x-api-key`, and `api-key`) are intentionally
+forwarded only to the allowlisted upstream and must be managed by the caller.
 
-## Coding Agent Wrappers
+## Noninteractive Coding Agents
 
 Launch an installed coding agent through an ephemeral loopback proxy. Native arguments
 go after `--`:
 
 ```sh
-blindfold run --guard claude -- --print "summarize this repo"
-blindfold run --guard codex -- exec "summarize this repo"
-blindfold run --guard codex -- review
-blindfold run --guard opencode -- run "inspect this project"
+blindfold run claude -- --print "summarize this repo"
+blindfold run codex -- exec "summarize this repo"
+blindfold run codex -- review
+blindfold run opencode -- run "inspect this project"
 ```
 
-No persistent Claude, Codex, or OpenCode configuration is changed. Managed wrappers
-start the agent with an allowlisted environment, so parent API-key variables and
-unrelated secrets are not inherited. Authenticate the agent with its persistent
-credential store or login flow; environment-only provider authentication is not
-available in managed mode. Non-interactive `codex exec`, `codex review`, and
-`opencode run` child stdout/stderr are captured and redacted before Blindfold prints
-them; interactive terminal output is not sanitized.
+No persistent Claude, Codex, or OpenCode configuration is changed. The child starts with
+an allowlisted environment, so parent API-key variables and unrelated secrets are not
+inherited. Authenticate the agent with its persistent credential store or login flow;
+environment-only provider authentication is not available. All supported child
+stdout/stderr is captured and sanitized before Blindfold prints it.
 
-Guard mode also sets proxy variables for the child process. For proxy-aware clients,
+Blindfold sets proxy variables for the child process. For proxy-aware clients,
 direct CONNECT tunnels to known LLM providers are blocked, common development
 registries are allowed, and unknown domains that pass through the guard proxy block
 until you allow them for the project:
@@ -300,41 +318,10 @@ blindfold status
 blindfold deny domain api.example.com
 ```
 
-Interactive Claude and Codex modes are blocked because their terminal streams are not
-captured and sanitized.
-Guarded Claude usage requires explicit `--print`/`-p`; guarded Codex usage is limited
-to non-interactive `exec` and `review`.
-
-Keep typing the native command names by activating shell wrappers:
-
-```sh
-eval "$(blindfold shell-init zsh)"
-
-claude
-codex review
-opencode run "fix the tests"
-```
-
-Use `bash` instead of `zsh` when appropriate. Opt out for one command:
-
-```sh
-bf-off claude
-bf-off codex review
-bf-off opencode
-```
-
-The explicit equivalents are:
-
-```sh
-BLINDFOLD_BYPASS=1 codex review
-blindfold run codex --no-proxy -- review
-```
-
-The wrapper prints protected and unavailable controls before launch. Guard mode
-sanitizes supported provider traffic and blocks direct known-provider CONNECT tunnels
-for proxy-aware clients. It does not sanitize interactive terminal output, mediate
-local file reads, or control network clients that ignore proxy settings. `--strict`
-refuses to start while full workspace controls remain unavailable.
+Only Claude `--print`/`-p`, Codex `exec`/`review`, and OpenCode `run` are accepted.
+Interactive/TUI, resume, server, plugin, remote-control, search, and dangerous bypass
+modes fail before the child starts. Blindfold has no `run` bypass flag, bypass
+environment variable, or generated shell-wrapper command.
 
 Important: `blindfold run ...` does not mediate agent file reads. If OpenCode, Codex,
 or Claude opens `.env` directly from the project, it can read the raw file. Trace
@@ -342,14 +329,81 @@ records mark agent sessions as degraded with `direct_filesystem_unmediated`; onl
 traffic that passes through Blindfold's managed provider proxy is sanitized. Full
 file-read protection requires future filesystem mediation or sandboxing.
 
-Automatic PII detection currently covers RFC-valid email addresses and valid,
+The managed runner sanitizes supported provider traffic and blocks direct known-provider
+CONNECT tunnels for proxy-aware clients. It does not mediate local file reads or control
+network clients that ignore proxy settings. Automatic PII detection currently covers
+RFC-valid email addresses and valid,
 `+`-prefixed international phone numbers. Names, postal addresses, national IDs,
 account numbers, and semantic PII are not detected. The TypeScript SDK can additionally
 tokenize PII values explicitly supplied by an application; it does not broaden the
-automatic detector set.
+automatic detector set. The Python SDK provides the same explicit application boundary
+with a provider-client wrapper.
 
-See [Coding agent wrappers](docs/coding-agents.md) for custom gateway examples and
-agent-specific routing behavior.
+See [Noninteractive coding agents](docs/coding-agents.md) for the exact protocol and
+argument contract.
+
+### Harness Adapters
+
+Claude, Codex, and OpenCode now use embedded strict TOML manifests for harness
+compatibility metadata, pinned versions, noninteractive modes, providers, transports,
+events, and permissions.
+The manifest parser and host can also validate an explicitly supplied plugin directory
+without searching the current project. There is no external install, activation, or
+execution command yet, and native tool hooks are not wired into `bf run`.
+
+An adapter's TOML manifest is data, not executable code. It may reference one contained
+out-of-process entrypoint and declare supported versions, commands, hooks, and required
+capabilities. The host bounds and strictly parses the manifest, rejects symlinks and
+escaping entrypoints, and never auto-loads project plugins. An entrypoint cannot replace
+Blindfold's detector, policy engine, SafeRef checks, sanitizer, provider proxy, trace
+schema, or fail-closed decisions.
+
+Installation must be an explicit user action. Blindfold will not auto-load a manifest
+from a repository, working tree, dependency directory, agent output, or URL. Project
+content remains untrusted, and upstream agent plugin modes remain rejected by protected
+`run` commands.
+
+Before a built-in launch, Blindfold validates the embedded schema, exact capability
+contract, resolved executable, and pinned harness version. Current pins are documented
+in [Noninteractive coding agents](docs/coding-agents.md); missing, ambiguous, or
+incompatible output rejects the run before proxy startup. A version probe is a
+compatibility check, not executable authentication or process containment. Tool-result
+hook events are reserved but not declared by current manifests until replacement
+behavior is verified.
+The provider proxy remains the final check for supported model traffic. Neither layer
+prevents direct socket exfiltration; that requires future OS containment. See
+[ADR 0009](docs/decisions/0009-harness-adapter-security-boundary.md).
+
+Manifest permissions describe the compatibility environment the runner supplies; they
+are not claims of OS-enforced filesystem, process, or network isolation.
+Embedded adapters use the core-owned `builtin-v1` protocol. `stdio-json-v1` is reserved
+for future contained external entrypoints and is not an executable path today.
+
+## Python SDK
+
+The dependency-free SDK masks application-registered values across wrapped client calls:
+
+```python
+from blindfold import Boundary
+from openai import OpenAI
+
+with Boundary(
+    secrets=["sk_test_fake_blindfold_1234567890"],
+    pii=["alice@example.test"],
+) as boundary:
+    client = boundary.wrap(OpenAI())
+    response = client.responses.create(
+        model="gpt-5",
+        input="Use sk_test_fake_blindfold_1234567890 for alice@example.test",
+    )
+    user_text = boundary.restore(response.output_text, destination="end_user")
+```
+
+Masking is the default; irreversible `redact` and fail-closed `block` modes are also
+available. PII restoration requires the `end_user` destination. Secrets are never
+restored into normal model or user output. This SDK is an in-process boundary and does
+not intercept arbitrary filesystem, environment, or network access. See
+[`sdk/python`](sdk/python/README.md).
 
 ## Request Tracing
 
@@ -358,7 +412,7 @@ managed agent session:
 
 ```sh
 bf redact .env --trace
-bf run --guard claude --trace -- --print "summarize this repo"
+bf run claude --trace -- --print "summarize this repo"
 ```
 
 Inspect the retained traces:
@@ -424,7 +478,7 @@ blindfold mcp --direction to-server --server demo < request.jsonl
 The underlying library supports injected field-level resolver policies. Only
 newline-delimited stdio JSON-RPC is in scope; MCP HTTP/network transports are not.
 
-## TypeScript SDK Preview
+## TypeScript SDK
 
 The dependency-free preview lives in [`sdk/typescript`](sdk/typescript):
 
@@ -457,9 +511,13 @@ Blindfold does not protect:
 - Windows.
 
 Read [Guarantees](docs/guarantees.md), [Threat Model](THREAT_MODEL.md),
-[Coding agent wrappers](docs/coding-agents.md),
+[Noninteractive coding agents](docs/coding-agents.md),
 [Claude Code limitations](docs/claude-code.md), [MCP preview](docs/mcp.md), and
-[SDK preview](docs/sdk.md) before using Blindfold.
+[application SDKs](docs/sdk.md) before using Blindfold.
+
+The [proxy and protocol lifecycle note](docs/proxy-protocol-lifecycle.md) records which
+model-boundary features remain required and which compatibility branches may be
+reviewed for future archival.
 
 ## Development
 
@@ -467,6 +525,8 @@ Read [Guarantees](docs/guarantees.md), [Threat Model](THREAT_MODEL.md),
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets --all-features -- -D warnings
 cargo test --workspace --all-targets --all-features
+npm --prefix sdk/typescript test
+PYTHONPATH=sdk/python/src python3 -m unittest discover -s sdk/python/tests -v
 cargo audit
 cargo deny check
 ```

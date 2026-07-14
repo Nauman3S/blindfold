@@ -62,5 +62,17 @@ Security reports are especially useful for:
 - vault key or plaintext storage defects; and
 - bypasses that contradict [THREAT_MODEL.md](THREAT_MODEL.md).
 
+For the harness-adapter architecture, reports are also in scope when a project
+can auto-activate an adapter, a manifest causes arbitrary code execution, incompatible
+versions or missing capabilities fail open, or an adapter can replace or disable a
+core security control. Adapter TOML is untrusted data, and any future installation must
+require an explicit user action. No external installation or activation command exists
+today.
+
+Once native harness hooks are supported, failure to sanitize a managed tool result
+before its next model call is relevant. Direct network exfiltration by a tool remains
+outside the current managed boundary until OS containment exists, but documentation or
+status that claims otherwise is a security issue.
+
 Behavior explicitly identified as outside the managed boundary may still be worth
 reporting when the product or documentation makes that limitation unclear.

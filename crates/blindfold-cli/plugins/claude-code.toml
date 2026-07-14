@@ -1,0 +1,23 @@
+manifest_version = 1
+id = "dev.blindfold.claude-code"
+version = "0.1.0"
+kind = "harness-adapter"
+protocol = "builtin-v1"
+entrypoint = "builtin/claude-code"
+
+[harness]
+command = "claude"
+version = "=2.1.152"
+noninteractive_modes = ["print"]
+
+[capabilities]
+providers = ["anthropic"]
+transports = ["http-json", "server-sent-events"]
+events = ["model-request", "model-response", "command-output"]
+
+[permissions]
+filesystem = ["workspace-read", "workspace-write", "session-temp"]
+network = ["model-proxy", "policy-egress"]
+environment = ["path", "home", "temp", "locale", "terminal", "user-identity", "shell", "host-config"]
+spawn_harness = true
+spawn_tools = true

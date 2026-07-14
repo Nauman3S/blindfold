@@ -1,6 +1,6 @@
 # ADR 0006: MITM Proxy Library Evaluation
 
-- Status: Proposed spike
+- Status: Deferred; not part of the ADR 0008 runner
 - Date: 2026-06-17
 
 ## Context
@@ -68,8 +68,8 @@ Keep as reference material only unless the maintained candidates fail.
 
 Do not add a MITM dependency to the main runtime yet.
 
-Add a P4C spike for an explicit `bf proxy --mitm` or equivalent guarded mode using
-`hudsucker` first. The spike must prove:
+Do not add MITM to the `v0.1.0` runner. If a later ADR reopens the work, evaluate an
+explicit opt-in proxy using `hudsucker` first. The spike must prove:
 
 - owner-only CA material handling;
 - explicit user trust instructions without silent root CA installation;
@@ -89,5 +89,6 @@ that nothing escapes. It does not mediate local file reads, malicious local proc
 clients that ignore proxy settings unless egress blocks them, certificate pinning, raw
 TCP sockets, or QUIC/UDP unless those paths are separately blocked.
 
-The default guard mode should remain usable without trusting a local root CA. Deep
-inspection must be explicit and visibly different from normal guard mode.
+The managed runner must remain usable without trusting a local root CA. Any future deep
+inspection must be explicit, separately reviewed, and visibly different from the
+current base-URL-routed model boundary.

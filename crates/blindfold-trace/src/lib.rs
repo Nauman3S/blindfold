@@ -49,6 +49,8 @@ pub enum Route {
     Unknown,
     /// A local file/stdin redaction operation.
     Redact,
+    /// A local file/stdin reversible masking operation.
+    Mask,
     /// A repository or file scan operation.
     Scan,
     /// A local explicit-secret execution operation.
@@ -79,8 +81,6 @@ pub enum Route {
     Init,
     /// A local diagnostic operation.
     Doctor,
-    /// A shell wrapper generation operation.
-    ShellInit,
 }
 
 /// How completely Blindfold inspected one exchange.

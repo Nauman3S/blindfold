@@ -47,11 +47,11 @@ jobs:
         run: rustup toolchain install 1.96.0 --profile minimal
       - name: Run tests
         run: cargo +1.96.0 test --workspace --all-targets --all-features
-      - name: Run manual guard smoke
+      - name: Run managed boundary smoke
         run: ./scripts/manual_guard_smoke.sh
 
   sdk:
-    name: TypeScript SDK Preview
+    name: Application SDK Previews
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -60,6 +60,11 @@ jobs:
           node-version: "22"
       - name: Run dependency-free SDK tests
         run: npm --prefix sdk/typescript test
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Run dependency-free Python SDK tests
+        run: PYTHONPATH=sdk/python/src python -m unittest discover -s sdk/python/tests -v
 
   supply-chain:
     name: Dependency Policy

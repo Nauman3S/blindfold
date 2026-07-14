@@ -648,6 +648,13 @@ fn build_command(request: &ExecutionRequest) -> Command {
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
 
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+
+        command.process_group(0);
+    }
+
     if let Some(path) = &request.command.working_directory {
         command.current_dir(path);
     }
@@ -684,12 +691,11 @@ fn wait_for_child(
             .try_wait()
             .map_err(|_| ExecutionError::ProcessControlFailed)?
         {
+            terminate_descendants(child);
             return Ok((status, false));
         }
         if Instant::now() >= deadline {
-            child
-                .kill()
-                .map_err(|_| ExecutionError::ProcessControlFailed)?;
+            terminate_process_group(child)?;
             let status = child
                 .wait()
                 .map_err(|_| ExecutionError::ProcessControlFailed)?;
@@ -700,9 +706,37 @@ fn wait_for_child(
 }
 
 fn terminate_child(child: &mut std::process::Child) {
-    let _ = child.kill();
+    let _ = terminate_process_group(child);
     let _ = child.wait();
 }
+
+#[cfg(unix)]
+fn terminate_process_group(child: &mut std::process::Child) -> Result<(), ExecutionError> {
+    use nix::{
+        sys::signal::{Signal, killpg},
+        unistd::Pid,
+    };
+
+    let process_group = i32::try_from(child.id())
+        .map(Pid::from_raw)
+        .map_err(|_| ExecutionError::ProcessControlFailed)?;
+    killpg(process_group, Signal::SIGKILL).map_err(|_| ExecutionError::ProcessControlFailed)
+}
+
+#[cfg(not(unix))]
+fn terminate_process_group(child: &mut std::process::Child) -> Result<(), ExecutionError> {
+    child
+        .kill()
+        .map_err(|_| ExecutionError::ProcessControlFailed)
+}
+
+#[cfg(unix)]
+fn terminate_descendants(child: &mut std::process::Child) {
+    let _ = terminate_process_group(child);
+}
+
+#[cfg(not(unix))]
+const fn terminate_descendants(_child: &mut std::process::Child) {}
 
 fn capture_stream(
     mut stream: impl Read,

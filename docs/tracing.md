@@ -6,7 +6,7 @@ log. It is disabled unless the global `--trace` flag is supplied.
 ```sh
 bf --trace doctor
 bf redact .env --trace
-bf run --guard claude --trace -- --print "summarize this repo"
+bf run claude --trace -- --print "summarize this repo"
 bf trace list
 bf trace show req_...
 bf trace tail
@@ -25,8 +25,8 @@ Each version 1 record contains:
 - input/output byte counts before and after sanitization where applicable;
 - operation-local replacement IDs such as `S1`;
 - closed detector categories;
-- sanitized structural pointers, such as `/env/DATABASE_URL` or JSON pointers where
-  applicable; arbitrary object keys become `*`;
+- sanitized structural pointers, such as `/env/DATABASE_URL` or safe JSON pointers where
+  applicable; unsafe pointer locations are omitted from replacement metadata;
 - replacement occurrence counts; and
 - a closed issue code when coverage is not protected.
 
@@ -72,4 +72,4 @@ network bypasses remain outside this trace boundary.
 
 For `run:claude`, `run:codex`, and `run:opencode`, the session record is degraded while
 filesystem mediation is absent. Trace can tell you that direct file reads were
-unmediated; it cannot see or redact what the agent read from disk.
+unmediated; tracing cannot see or redact what the agent read from disk.

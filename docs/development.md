@@ -19,6 +19,7 @@ Install Gitleaks from its maintained release packages. CI uses a pinned containe
 cargo build --workspace
 cargo test --workspace --all-targets --all-features
 cargo build --workspace --release
+./scripts/manual_guard_smoke.sh
 ```
 
 ## Formatting and Linting
@@ -41,10 +42,17 @@ cargo audit
 cargo deny check
 ```
 
-TypeScript SDK preview:
+TypeScript SDK:
 
 ```sh
 npm --prefix sdk/typescript test
+```
+
+Python SDK:
+
+```sh
+PYTHONPATH=sdk/python/src python3 -m unittest discover -s sdk/python/tests -v
+uv build sdk/python
 ```
 
 Focused iteration commands:
@@ -96,6 +104,15 @@ assertion fails.
 Check Markdown links and commands manually when changing docs. Material changes to the
 managed boundary, platform support, SafeRefs, vault, or dependency policy require an ADR
 under `docs/decisions/`.
+
+Harness adapter manifests are treated as untrusted test data. Current tests must prove
+absence of project-directory auto-loading and fail-closed version and capability gates.
+Before external execution or native tool hooks can be enabled, tests must additionally
+prove explicit installation, hook-result sanitization, and a final provider-proxy check.
+A manifest may reference only a contained out-of-process entrypoint. It must never add
+an in-process library, shell command, policy implementation, or restoration path.
+Hook-result sanitization tests become mandatory before a manifest may declare tool
+events.
 
 ## CI Layout
 

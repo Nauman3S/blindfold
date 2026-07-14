@@ -1,64 +1,22 @@
-# Claude Code Integration
+# Claude Code
 
-The shared wrapper and opt-out workflow is documented in
-[Coding Agent Wrappers](coding-agents.md). This page records Claude-specific boundary
-details.
-
-## Status
-
-`blindfold run --guard claude -- --print "prompt"` starts a local
-Anthropic-compatible application proxy and points the Claude process at it with an
-ephemeral `ANTHROPIC_BASE_URL`. No persistent Claude configuration is changed. Bare
-interactive Claude fails closed because that transport is not proven safe. Strict mode
-refuses to start because the full boundary cannot yet be established.
-
-## Intended Protected Paths
-
-The wrapper will protect only paths it can establish and verify, expected to include:
-
-- supported Anthropic-compatible JSON requests routed through the local proxy; and
-- supported JSON and SSE responses routed back through the proxy.
-
-Startup must list each path as protected, degraded, or unprotected.
-
-## Bypass Risks
-
-The following remain unprotected unless the wrapper can explicitly mediate them:
-
-- direct provider endpoints or credentials configured outside the wrapper;
-- direct filesystem or network access not covered by a supported hook;
-- commands launched outside `blindfold exec`;
-- unsupported Claude Code versions, hooks, plugins, or transports; and
-- child processes intentionally exfiltrating a value they were approved to receive.
-
-The managed child uses an environment allowlist and does not inherit parent API-key
-variables or unrelated secrets. The current preview does not sanitize the interactive
-terminal stream, install file/tool hooks, broker provider credentials into Claude, or
-prevent direct network/filesystem bypasses. Authenticate through Claude's persistent
-login or credential store; environment-only provider authentication requires a visible
-bypass. Use `blindfold exec` or `blindfold call` for separate scoped secret use.
-
-`--strict` refuses to start because these controls cannot yet establish the documented
-MVP boundary. It does not create an OS sandbox or network firewall.
-
-## Preview Workflow
+Blindfold supports Claude Code only in explicit print mode:
 
 ```sh
-blindfold init
-blindfold doctor
-blindfold run --guard claude -- --print "summarize this repo"
+bf run claude -- --print "summarize this repo"
+bf run claude -- -p --model sonnet "summarize this repo"
 ```
 
-Pass native Claude arguments after `--`, for example:
+The embedded adapter accepts only Claude Code `2.1.152`. Missing, ambiguous, or
+different `claude --version` output rejects the run before the proxy or agent starts.
 
-```sh
-blindfold run --guard claude -- --print --model sonnet "summarize this repo"
-```
+Bare interactive Claude, resume/continue, remote control, worktrees, plugin URLs, tmux,
+and permission-bypass modes fail before Claude starts. Blindfold sets an ephemeral
+`ANTHROPIC_BASE_URL`, sanitizes accepted JSON requests/responses, accepts bounded
+Anthropic response SSE required by print mode, and captures sanitized process output.
 
-Use `blindfold run claude --no-proxy -- ...` for a visible one-run bypass.
-
-## Troubleshooting Contract
-
-Diagnostics must identify configuration, local storage, loopback listener, and
-integration readiness without printing secret values, request bodies, response bodies,
-or the process environment.
+The child receives an allowlisted environment and does not inherit parent API-key
+variables. Authentication currently relies on Claude's persistent login or credential
+store. Blindfold does not yet broker that credential or mediate Claude's filesystem
+reads and direct sockets, so this is a managed model-traffic boundary rather than an OS
+sandbox. See [Noninteractive Coding Agents](coding-agents.md) for the complete contract.

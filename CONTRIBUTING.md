@@ -9,6 +9,8 @@ about their trust boundary, and backed by tests proportional to their risk.
 - `cargo-audit`
 - `cargo-deny`
 - Gitleaks
+- Node.js 22.6 or newer for the TypeScript SDK
+- Python 3.10 or newer and `uv` for Python SDK packaging
 
 The pinned Rust toolchain is installed automatically by `rustup` when commands run in the
 repository.
@@ -20,7 +22,11 @@ Run before submitting a change:
 ```sh
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets --all-features -- -D warnings
-cargo test --workspace --all-features
+cargo test --workspace --all-targets --all-features
+npm --prefix sdk/typescript test
+PYTHONPATH=sdk/python/src python3 -m unittest discover -s sdk/python/tests -v
+uv build sdk/python
+./scripts/manual_guard_smoke.sh
 cargo audit
 cargo deny check
 gitleaks detect --source . --config .github/gitleaks.toml --redact
@@ -38,6 +44,18 @@ See [docs/development.md](docs/development.md) for installation and platform det
 - Never print raw fixture values in a failing assertion. Prefer identifiers and redacted
   fingerprints.
 - Security-sensitive malformed or unsupported input must fail closed.
+- New agent modes must be noninteractive, have captured output, and prove both traffic
+  directions against a fake upstream before becoming supported.
+- Harness adapters must use the strict manifest schema, finite lower and upper version
+  bounds, exact core-owned capability gates, and fail before proxy startup on a probe
+  mismatch.
+- Never auto-load adapters or plugin manifests from a project tree. External entrypoints
+  must remain explicitly selected, out of process, and contained by their installation
+  directory.
+- Do not declare tool-request or tool-result events until the corresponding native hook
+  is established and its bounded payload is sanitized by core.
+- New provider transports require an explicit route/method/media grammar and negative
+  tests for opaque, fragmented, and oversized inputs.
 - Logging and error changes must be reviewed for accidental payload, header,
   environment, path, or secret disclosure.
 - New restoration destinations require a threat-model and policy update.
@@ -68,7 +86,8 @@ Generated dependency updates should be isolated from behavior changes where prac
 
 ## Architecture Decisions
 
-Material changes to the managed boundary, SafeRef format, vault, platform support,
+Material changes to the managed boundary, supported agent grammar, provider protocol,
+SafeRef format, vault, platform support,
 cryptography, serialization, network exposure, or dependency strategy require an ADR in
 `docs/decisions/`. Supersede prior decisions rather than silently rewriting history.
 

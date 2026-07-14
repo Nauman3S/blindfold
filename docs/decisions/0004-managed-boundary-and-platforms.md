@@ -1,6 +1,6 @@
 # ADR 0004: Managed Boundary and Initial Platforms
 
-- Status: Accepted
+- Status: Accepted boundary; runner-mode wording superseded by ADR 0008
 - Date: 2026-06-11
 
 ## Context
@@ -16,8 +16,10 @@ wrapper, proxy, broker, or execution component and reported as protected at star
 Direct provider traffic, file reads, commands, and network calls outside those components
 are outside the boundary.
 
-Strict mode rejects known missing controls. It does not claim OS sandboxing, transparent
-TLS interception, brokered filesystem access, or network egress enforcement.
+ADR 0008 removed the preview runner `--strict` mode. The current runner always
+establishes its managed model-traffic controls but reports filesystem reads and direct
+network clients as unmediated. It does not claim OS sandboxing, transparent TLS
+interception, brokered filesystem access, or OS-enforced network egress.
 
 Support macOS and Linux for `v0.1.0`, subject to the tested release matrix in
 `docs/platforms.md`. Windows and other platforms are unsupported, even if compilation

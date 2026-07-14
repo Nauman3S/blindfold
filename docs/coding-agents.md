@@ -1,162 +1,170 @@
-# Coding Agent Wrappers
+# Noninteractive Coding Agents
 
-Blindfold can launch Claude Code, Codex CLI, and OpenCode through an ephemeral local
-application proxy. It does not modify the agents' persistent configuration.
-
-## Direct Usage
+Blindfold supports only explicit, noninteractive coding-agent commands:
 
 ```sh
-blindfold run --guard claude -- --print "summarize this repo"
-blindfold run --guard codex -- exec "summarize this repo"
-blindfold run --guard codex -- review
-blindfold run --guard opencode -- run "inspect this project"
+bf run claude -- --print "summarize this repo"
+bf run codex -- exec "summarize this repo"
+bf run codex -- review
+bf run opencode -- run "inspect this project"
 ```
 
-Arguments after `--` are passed to the native agent unchanged.
+Interactive/TUI, resume, server, remote-control, plugin, search, and permission-bypass
+modes are rejected before the child starts. There is no `run` bypass flag, environment
+bypass, or generated shell wrapper. Run the native agent directly when Blindfold is not
+intended to manage that invocation.
 
-The default upstreams are:
+Here, `plugin` means an upstream agent plugin mode or URL. Blindfold adapter manifests
+are different: they are strictly parsed compatibility data and do not enable an upstream
+agent plugin mode.
 
-- Claude and OpenCode Anthropic: `https://api.anthropic.com`
-- Codex and OpenCode OpenAI: `https://api.openai.com`
-- OpenCode OpenRouter: `https://openrouter.ai/api`
+## Compatibility Gates
 
-Override them only when using a compatible gateway:
+`bf run` executes `--version` through a bounded, minimal-environment probe before it
+starts the model proxy or the agent. The first release accepts only the exact versions
+used by the fake-upstream and installed-client checks. A future patch is rejected until
+its transports and configuration behavior are tested.
+
+| Adapter | Accepted harness version |
+|---|---|
+| Claude Code | `2.1.152` |
+| Codex CLI | `0.144.1` |
+| OpenCode | `1.17.3` |
+
+Missing, malformed, ambiguous, truncated, timed-out, nonzero, or incompatible version
+output fails before agent startup. The probe executes the selected harness binary, so it
+is compatibility evidence, not executable authentication or a sandbox. `bf doctor`
+validates the embedded contracts but does not execute installed agent binaries.
+
+## Managed Boundary
+
+For every supported invocation, Blindfold:
+
+1. starts an ephemeral loopback provider proxy;
+2. starts a deny-by-default proxy-aware egress guard;
+3. clears the parent environment and passes only a small operational allowlist;
+4. injects an ephemeral provider base URL into the agent configuration;
+5. captures and sanitizes child stdout and stderr; and
+6. records payload-free trace metadata only when `--trace` is selected.
+
+The transport contract is intentionally narrow:
+
+| Agent command | Managed provider transport |
+|---|---|
+| `claude --print ...` / `claude -p ...` | Anthropic JSON POST; bounded Anthropic response SSE |
+| `codex exec ...` | OpenAI JSON POST or JSON-object text frames on `/responses` WebSocket |
+| `codex review` | Same Codex Responses transports |
+| `opencode run ...` | OpenAI, Anthropic, or OpenRouter JSON POST; bounded Anthropic response SSE |
+
+Anthropic SSE requests, OpenAI SSE, binary WebSocket frames, arbitrary WebSocket paths,
+non-POST HTTP operations, and unsupported non-empty media types fail closed. The proxy
+sanitizes every string value in accepted JSON rather than maintaining a fragile list of
+provider fields.
+
+## Network Policy
+
+The child receives `HTTP_PROXY`, `HTTPS_PROXY`, and `ALL_PROXY`. Known LLM provider
+CONNECT tunnels and unknown domains are blocked when the client honors proxy settings.
+Common package registries are allowed by default; project-specific destinations are
+explicit:
 
 ```sh
-blindfold run --guard claude \
-  --anthropic-upstream https://gateway.example/anthropic \
-  -- --print --model sonnet "summarize this repo"
+bf allow domain api.example.com
+bf status
+bf deny domain api.example.com
+```
 
-blindfold run --guard codex \
-  --openai-upstream https://gateway.example/openai \
+This is destination control, not arbitrary TLS inspection. A process that ignores proxy
+settings can still open a direct socket because Blindfold does not yet install an OS
+network sandbox.
+
+## Credential And File Boundary
+
+Parent API-key variables and unrelated environment values are not inherited. Provider
+authentication currently uses the agent's persistent login or credential store; it is
+not yet brokered by Blindfold.
+
+The agent still runs in the real working directory. If it opens `.env`, `.env.local`, a
+cloud credential file, or another readable path, it receives the file exactly as stored.
+Use `bf mask`, `bf redact`, `bf exec`, and `bf call` for their explicit managed paths.
+`bf run --trace` marks the session degraded with
+`direct_filesystem_unmediated`.
+
+Consequently, `bf run` is a managed model-traffic boundary, not whole-agent containment.
+It must not be described as guaranteeing that an agent cannot read or directly
+exfiltrate a local secret. That stronger guarantee requires the planned isolated
+workspace, credential broker, and OS-enforced process/network sandbox.
+
+## Upstream Overrides
+
+Compatible test or enterprise gateways can be selected explicitly:
+
+```sh
+bf run claude --anthropic-upstream https://gateway.example/anthropic \
+  -- --print "summarize this repo"
+
+bf run codex --openai-upstream https://gateway.example/openai \
   -- review
 
-blindfold run --guard opencode \
-  --openrouter-upstream https://openrouter.ai/api \
+bf run opencode --openrouter-upstream https://openrouter.ai/api \
   -- run "inspect this project"
 ```
 
-## Keep Native Command Names
+No persistent Claude, Codex, or OpenCode configuration is modified.
 
-For the current shell:
+## Harness Adapter Status
 
-```sh
-eval "$(blindfold shell-init zsh)"
+The strict TOML schema, manifest parser, explicit-directory loader, contained-entrypoint
+validation, capability declarations, and exact version probes are implemented. The
+three commands above use embedded manifests and retain their provider fake-upstream
+conformance tests.
+
+The manifest itself is data. It may reference a contained out-of-process entrypoint, but
+the host does not load dynamic libraries or execute project-local code. Blindfold does
+not discover manifests from a project directory, repository configuration, dependency
+tree, agent response, or remote URL. An adapter cannot replace detection, policy,
+SafeRef resolution, sanitization, tracing, or provider-proxy enforcement.
+
+There is no external install, activation, or execution command. Native pre/post-tool
+hook injection is not implemented. Current manifests therefore do not declare
+`tool-request` or `tool-result` events. Adding either event requires harness-specific
+replacement, failure, subagent, and provider-boundary conformance tests.
+
+An external package reserved for future activation uses the fixed filename
+`blindfold-plugin.toml` and a finite version range:
+
+```toml
+manifest_version = 1
+id = "dev.example.claw-code"
+version = "0.1.0"
+kind = "harness-adapter"
+protocol = "stdio-json-v1"
+entrypoint = "bin/blindfold-claw-code"
+
+[harness]
+command = "claw-code"
+version = ">=1.4.0, <1.5.0"
+noninteractive_modes = ["run"]
+
+[capabilities]
+providers = ["open-ai"]
+transports = ["http-json"]
+events = ["model-request", "model-response", "command-output"]
+
+[permissions]
+filesystem = ["workspace-read", "workspace-write", "session-temp"]
+network = ["model-proxy"]
+environment = ["path", "home", "temp", "locale", "terminal"]
+spawn_harness = true
+spawn_tools = true
 ```
 
-Use `bash` instead of `zsh` when appropriate. After activation, normal commands are
-wrapped:
+The host rejects unknown fields, wildcard or one-sided version ranges, unsafe command
+names, duplicate declarations, manifest symlinks, and entrypoints that escape their
+explicit installation directory. This package can be validated by the library today,
+but `bf run claw-code` is not enabled until external execution is implemented and tested.
 
-```sh
-claude
-codex review
-opencode run "fix the tests"
-```
-
-To activate this for future shells, add the `eval` command to `.zshrc` or `.bashrc`.
-The generated functions call the real executable with `command`, so they do not recurse.
-Bare interactive `claude`, `codex`, or `opencode` shell-wrapper invocations will fail
-closed under Guard until those transports are proven safe. Pass the supported
-non-interactive arguments shown above.
-
-## Opt Out
-
-Opt out for one invocation:
-
-```sh
-bf-off claude
-bf-off codex review
-bf-off opencode
-```
-
-Equivalent explicit forms:
-
-```sh
-BLINDFOLD_BYPASS=1 claude
-blindfold run codex --no-proxy -- review
-```
-
-Opt-out mode launches the native executable directly and prints a visible bypass notice.
-It does not change persistent configuration.
-
-## Agent Integration
-
-- Claude receives an ephemeral `ANTHROPIC_BASE_URL`.
-- Codex receives an ephemeral `openai_base_url` CLI configuration override for
-  non-interactive `exec` and `review` runs. Blindfold bridges and sanitizes its
-  responses WebSocket text frames in both directions. Interactive Codex remains
-  blocked because its terminal output is not captured.
-- OpenCode receives an `OPENCODE_CONFIG_CONTENT` overlay for its OpenAI and Anthropic
-  provider base URLs (`/openai/v1`, `/anthropic/v1`, and `/openrouter/v1`). Existing
-  inline settings are retained.
-
-## Compatibility Matrix
-
-`Proven` means automated fake-upstream regression coverage verifies redaction in both
-directions. Codex 0.141 additionally has a real installed-client verification showing a
-fake key replaced before provider delivery and recorded as payload-free `/websocket`
-trace metadata.
-
-| Agent mode | Provider route | Inspectable transport | Credential source | Status | Notes |
-|---|---|---|---|---|---|
-| `claude --print ...` / `claude -p ...` | Anthropic through `/anthropic/v1` | HTTP JSON; Anthropic SSE sanitization is supported by the proxy | Native Claude login/config; parent env credentials are stripped | Proven for HTTP JSON | Interactive Claude, resume, remote, worktree, plugin URL, and permission-bypass modes fail closed. |
-| `codex exec ...` | ChatGPT Codex or explicit OpenAI-compatible upstream through `/openai` | Responses WebSocket text frames with HTTPS fallback | Native Codex login/config; parent env credentials are stripped | Proven with Codex 0.141 | Controlled fake-upstream tests and a real installed Codex run verify request redaction and payload-free replacement tracing. |
-| `codex review` | ChatGPT Codex or explicit OpenAI-compatible upstream through `/openai` | Responses WebSocket text frames with HTTPS fallback | Native Codex login/config; parent env credentials are stripped | Transport proven | Uses the same guarded WebSocket bridge as `codex exec`. |
-| interactive `codex` | Same provider transport | WebSocket | Native Codex login/config | Unsupported; fails closed | Provider transport is sanitized, but interactive terminal output is not captured. |
-| `opencode run ...` with OpenAI | OpenAI through `/openai/v1` | HTTP JSON | Native OpenCode login/config; parent env credentials are stripped | Proven for HTTP JSON | Current fake-upstream coverage exercises the OpenAI provider route. |
-| `opencode run ...` with Anthropic | Anthropic through `/anthropic/v1` | HTTP JSON; Anthropic SSE sanitization is supported by the proxy | Native OpenCode login/config; parent env credentials are stripped | Proven for HTTP JSON | Runtime config is injected and fake-upstream coverage verifies request/response redaction. |
-| `opencode run ...` with OpenRouter | OpenRouter through `/openrouter/v1` | OpenAI-compatible HTTP JSON | Native OpenCode login/config; parent env credentials are stripped | Proven for HTTP JSON | Route is configured through the OpenAI-compatible proxy path and covered by fake-upstream tests. |
-| OpenCode TUI/server mode | OpenAI, Anthropic, and OpenRouter config overlay | Depends on OpenCode mode/plugins | Native OpenCode login/config | Unsupported; fails closed | Use explicit `opencode run ...` for the currently tested guarded path. |
-| Agent plugins/tools | Varies | Varies | Varies | Not mediated by wrapper alone | Use `blindfold exec`, `blindfold call`, MCP stdio preview, or future broker integrations for scoped secret use. |
-
-The proxy exists only for the child process lifetime and binds to an ephemeral loopback
-port. The child receives an allowlisted environment and does not inherit parent API-key
-variables or unrelated secrets. Authentication must use the agent's persistent
-credential store or login flow. Environment-only provider authentication still requires
-a visible `--no-proxy` bypass; the current broker commands cover scoped child
-execution and one bearer-token HTTP call, not agent provider login.
-
-For non-interactive `codex exec`, `codex review`, and `opencode run`, Blindfold captures
-child stdout/stderr, redacts detected secrets, then prints the sanitized output while
-preserving the child exit code. Interactive passthrough modes are not captured, so their
-terminal output is not sanitized.
-
-## Guard Egress Policy
-
-Guard mode sets `HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY`, and `NO_PROXY` for the child
-agent. For proxy-aware clients, direct CONNECT tunnels to known LLM providers such as
-OpenAI, Anthropic, OpenRouter, Gemini, Mistral, or Groq are blocked.
-
-Common development domains are allowed by default for proxy-aware clients: GitHub, npm,
-PyPI, crates.io, and Go module mirrors. Unknown domains that pass through the guard
-proxy block by default until the project allows them:
-
-```sh
-blindfold allow domain api.example.com
-blindfold status
-blindfold deny domain api.example.com
-```
-
-This is destination control, not TLS body inspection. Blindfold does not install a root
-CA in v1 and does not inspect arbitrary encrypted HTTPS payloads.
-
-## Current Boundary
-
-The wrappers sanitize supported provider JSON and SSE request/response fields. Guard
-mode also sets proxy environment variables, sanitizes captured non-interactive child
-stdout/stderr, and blocks direct known-provider CONNECT tunnels for proxy-aware clients.
-They do not currently sanitize interactive terminal output, broker provider credentials
-into the agent process, mediate direct filesystem access, or control network clients
-that ignore proxy settings.
-`--strict` therefore refuses to start instead of claiming full workspace controls exist.
-
-Agent file reads are not mediated. If an agent opens `.env`, `.env.local`, or any other
-project file directly, it reads the file from disk exactly as stored. Use `blindfold
-redact FILE` for one-off inspection, `blindfold exec` for controlled child-process
-secret injection, or `blindfold call` for one bearer-token HTTP request. `run --trace`
-records the session as degraded with
-`direct_filesystem_unmediated`; it does not redact direct file reads.
-
-OpenCode providers other than `openai`, `anthropic`, and `openrouter` are not routed
-through Blindfold. Managed OpenCode settings may also override runtime configuration;
-verify organizational policy before relying on the wrapper.
+When those hooks are implemented, bounded tool results will pass through core
+sanitization before the next model call. The provider proxy will still perform the final
+request and response check. Neither mechanism stops a tool from sending data directly
+to an unmediated network destination; that guarantee requires OS containment.

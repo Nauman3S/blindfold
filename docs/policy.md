@@ -29,6 +29,11 @@ A policy decision considers:
 
 An untrusted destination cannot request or override `restore`.
 
+Harness adapters cannot add policy actions, change invariant precedence, authorize a
+destination, or implement restoration. Their TOML manifests are untrusted
+compatibility data; only non-pluggable core policy can decide whether a declared
+capability is available for a run.
+
 ## Precedence
 
 Highest precedence wins:
@@ -55,6 +60,8 @@ unsupported policy affecting a sensitive operation fails closed.
   findings.
 
 Modes are explicit policy data, not scattered conditional behavior.
+The `strict` policy preset is not a coding-agent runner mode; the former runner
+`--strict` flag was removed by ADR 0008.
 
 ## Example Target Configuration
 

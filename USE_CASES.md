@@ -1,436 +1,174 @@
-# Blindfold: Simple Use Cases
+# Blindfold Use Cases
 
-This is the short guide. You do not need to learn every Blindfold command.
+## Command Summary
 
-## What Should I Use?
+| Task | Command |
+|---|---|
+| Scan a repository | `bf scan .` |
+| Redact detected values | `bf redact .env` |
+| Replace values with vault-backed SafeRefs | `bf mask .env` |
+| Run a command with selected env values | `bf exec --secret NAME -- command` |
+| Make an authorized bearer call | `bf call --secret NAME --url https://host/path` |
+| Run Claude noninteractively | `bf run claude -- --print "prompt"` |
+| Run Codex noninteractively | `bf run codex -- exec "prompt"` |
+| Run a Codex review | `bf run codex -- review` |
+| Run OpenCode noninteractively | `bf run opencode -- run "prompt"` |
 
-| I want to... | Command |
-| --- | --- |
-| Start Codex with Blindfold Guard | `blindfold run --guard codex -- exec "summarize this repo"` |
-| Start Claude with Blindfold Guard | `blindfold run --guard claude -- --print "summarize this repo"` |
-| Start OpenCode with Blindfold Guard | `blindfold run --guard opencode -- run "inspect this repo"` |
-| Trace a command or agent session | `bf redact .env --trace` |
-| Inspect the latest trace | `bf trace tail` |
-| Temporarily run an agent without Blindfold | `blindfold run codex --no-proxy` |
-| Check a project for secrets | `blindfold scan .` |
-| Print a file with secrets hidden | `blindfold redact .env` |
-| Check changed code before committing | `blindfold diff-check` |
-| Give one secret to a command | `blindfold exec --secret NAME -- command` |
-| Call one API with a secret | `blindfold call --secret NAME --url https://api.example.com` |
+Interactive/TUI sessions are not part of the Blindfold runner. Run native agent commands
+directly when Blindfold is not intended to manage that invocation.
 
-The built-in redactor recognizes common provider keys, private keys, bearer/JWT/OAuth
-tokens, password-like assignments, passwords in database/Redis/SMTP URLs, RFC-valid
-email addresses, and valid `+`-prefixed international phone numbers. It does not detect
-every secret or every kind of personal data.
-
-## First-Time Setup
-
-Build Blindfold and put it on your current shell's `PATH`:
+## Scan Before Sharing
 
 ```sh
-git clone https://github.com/Nauman3S/blindfold.git
-cd blindfold
-cargo build --release
-export PATH="$PWD/target/release:$PATH"
+bf scan .
+bf scan config.json --json
 ```
 
-Create the project configuration and check your setup:
+Exit code `2` means findings were detected. Exit code `3` means the scan was incomplete
+because a read, file-size, or traversal limit prevented complete inspection.
+
+## Redact Or Block Content
 
 ```sh
-blindfold init
-blindfold doctor
+bf redact .env
+bf redact config.json --mode schema-only
+bf redact config.json --mode placeholder
+bf redact config.json --mode surrogate
+bf redact config.json --mode block
+bf redact .env --mode env-ref
 ```
 
-`init` creates a preview configuration in the current working directory. `doctor`
-validates it, but most runtime commands currently use CLI defaults and flags. Do not run
-`init` again if `.blindfold.yaml` already exists.
+`placeholder`, `schema-only`, and `env-ref` are irreversible transformations. A
+surrogate is stable only within one operation. `block` emits no transformed payload when
+a finding exists.
 
-## Use Case 1: Run Codex Now
-
-Run Codex non-interactively through Guard:
+Write to a different file:
 
 ```sh
-blindfold run --guard codex -- exec "summarize this repo"
+bf redact .env --output env.redacted
 ```
 
-Do not put another `codex exec ...` command inside the quoted prompt. Everything after
-`--` is already passed to Codex, so the model prompt is only the final string.
+Existing output is not replaced unless `--force` is explicit.
 
-Pass normal Codex arguments after `--`:
+## Mask With SafeRefs
 
-```sh
-blindfold run --guard codex -- exec "explain this repository"
-blindfold run --guard codex -- review
-blindfold run --guard codex -- exec --sandbox workspace-write "find the risky files"
-```
-
-Blindfold starts a temporary local proxy, launches Codex, and stops the proxy when
-Codex exits. Guard mode also sets proxy environment variables so proxy-aware clients
-route through Blindfold; direct CONNECT attempts to known LLM providers are blocked.
-It does not permanently edit Codex configuration.
-
-Interactive Claude and Codex modes are blocked until those transports are proven safe.
-Use `claude --print`/`-p`, `codex exec`, or `codex review` under Guard.
-
-Guard mode allows common development services such as GitHub, npm, PyPI, crates.io,
-and Go module mirrors for proxy-aware clients. Unknown domains are blocked by default
-when they pass through the guard proxy. If your project needs a specific destination,
-allow it for this project:
-
-```sh
-blindfold allow domain api.example.com
-blindfold status
-```
-
-Remove access with:
-
-```sh
-blindfold deny domain api.example.com
-```
-
-Managed mode does not pass parent API-key variables or unrelated secrets to Codex.
-Sign in through Codex's persistent credential store first. Use `--no-proxy` only when
-you intentionally need the native environment for one run.
-
-## Use Case 2: Run Claude or OpenCode
-
-```sh
-blindfold run --guard claude -- --print "summarize this repo"
-blindfold run --guard opencode -- run "inspect this repo"
-```
-
-Examples with native arguments:
-
-```sh
-blindfold run --guard claude -- --print --model sonnet "summarize this repo"
-blindfold run --guard opencode -- run "find the failing test"
-```
-
-## Use Case 3: Trace What Blindfold Protected
-
-Tracing is off unless you request it. Trace a single command:
-
-```sh
-bf redact .env --trace
-```
-
-Trace a Codex session and its managed provider requests:
-
-```sh
-bf run --guard codex --trace -- exec "summarize this repo"
-```
-
-Traced agent runs do not redact direct file reads. If the agent opens `.env` from the
-project, it can see the raw file. The trace marks the session as degraded with
-`direct_filesystem_unmediated`; only managed provider requests are sanitized.
-
-After the agent makes provider requests:
-
-```sh
-bf trace list
-bf trace tail
-bf trace show req_...
-```
-
-Export one versioned metadata record for a bug report:
-
-```sh
-bf trace export req_... --redacted
-```
-
-The export tells you whether the record came from a local command, a Codex/Claude/OpenCode
-session, or a provider request. It contains no payload preview, headers, query string, or
-raw detected value.
-Delete trace metadata independently:
-
-```sh
-bf trace clear --yes
-```
-
-## Use Case 4: Keep Using the Normal Agent Names
-
-Instead of typing `blindfold run` every time, activate shell wrappers:
-
-```sh
-eval "$(blindfold shell-init zsh)"
-```
-
-For Bash:
-
-```sh
-eval "$(blindfold shell-init bash)"
-```
-
-Now use the usual commands:
-
-```sh
-codex
-claude
-opencode
-```
-
-This activation lasts only for the current terminal. To enable it in every new Zsh
-terminal:
-
-```sh
-printf '%s\n' 'eval "$(blindfold shell-init zsh)"' >> ~/.zshrc
-```
-
-Open a new terminal or run `source ~/.zshrc`.
-
-## Use Case 5: Temporarily Opt Out
-
-If you activated the shell wrappers, bypass Blindfold for one command:
-
-```sh
-bf-off codex
-bf-off claude
-bf-off opencode
-```
-
-Without shell wrappers, use:
-
-```sh
-blindfold run codex --no-proxy
-```
-
-To bypass wrappers for several commands in the current terminal:
-
-```sh
-export BLINDFOLD_BYPASS=1
-codex
-```
-
-Turn Blindfold back on:
-
-```sh
-unset BLINDFOLD_BYPASS
-```
-
-Blindfold prints a bypass notice when it launches an agent without the proxy.
-
-## Use Case 6: Check a Project Before Sharing It
-
-Scan the current working directory:
-
-```sh
-blindfold scan .
-```
-
-Scan one file:
-
-```sh
-blindfold scan config.json
-```
-
-Use JSON output in scripts:
-
-```sh
-blindfold scan . --json
-```
-
-Exit code `0` means a complete scan with no findings. Exit code `2` means a complete
-scan found sensitive content. Exit code `3` means the scan was incomplete because of an
-I/O error, oversized file, or traversal budget. Policy skips such as ignored or binary
-files are reported but do not by themselves make a scan incomplete.
-
-## Use Case 7: Hide Secrets in a File
-
-Print a redacted version of `.env`:
-
-```sh
-blindfold redact .env
-```
-
-This prints the safe result to the terminal. It does not modify `.env`.
-
-Write the redacted output to a different file:
-
-```sh
-blindfold redact .env --output env.redacted
-```
-
-Existing output files are refused by default. Use `--force` only when replacement is
-intentional; Blindfold performs forced replacement atomically.
-
-For dotenv files, preserve variable names:
-
-```sh
-blindfold redact .env --mode env-ref
-```
-
-Example output:
-
-```text
-OPENAI_API_KEY=${OPENAI_API_KEY}
-DATABASE_URL=${DATABASE_URL}
-```
-
-Redact piped text:
-
-```sh
-some-command | blindfold redact
-```
-
-## Use Case 8: Give a Secret to One Command
-
-Suppose a command needs `DEMO_API_KEY`:
-
-```sh
-export DEMO_API_KEY='your-value'
-blindfold exec --secret DEMO_API_KEY -- your-command
-```
-
-Example:
-
-```sh
-blindfold exec --secret DEMO_API_KEY -- \
-  sh -c 'test -n "$DEMO_API_KEY" && echo "key is available"'
-```
-
-Select multiple secrets by repeating `--secret`:
-
-```sh
-blindfold exec \
-  --secret OPENAI_API_KEY \
-  --secret DATABASE_URL \
-  -- your-command
-```
-
-Only selected secrets are injected. Blindfold redacts those exact values from captured
-stdout and stderr.
-
-Do not place the secret itself in command arguments:
-
-```sh
-# Wrong: the raw value becomes a process argument.
-your-command --token "$DEMO_API_KEY"
-```
-
-## Use Case 9: Call One API Without Printing the Secret
-
-Use this when a command or agent needs one bearer-token HTTP call, but you only want
-the response and safe metadata shown:
-
-```sh
-export STRIPE_SECRET_KEY='sk_test_fake_blindfold_example_1234567890'
-blindfold allow domain api.stripe.com
-blindfold call --secret STRIPE_SECRET_KEY --url https://api.stripe.com/v1/customers
-```
-
-For a POST with a non-secret JSON body:
-
-```sh
-blindfold call \
-  --secret STRIPE_SECRET_KEY \
-  --method POST \
-  --url https://api.stripe.com/v1/customers \
-  --body '{"email":"ada@example.com"}'
-```
-
-Blindfold sends the selected secret as `Authorization: Bearer ...`, redacts the
-response before printing it, enforces the project domain policy, and can trace the
-operation without storing payloads:
-
-```sh
-blindfold call --trace --secret STRIPE_SECRET_KEY --url https://api.stripe.com/v1/customers
-bf trace tail
-```
-
-This is intentionally narrow. It does not replace `curl`, does not support arbitrary
-secret placement yet, and does not stop a separate process from making its own network
-call. `--body` is limited to 64 KiB of non-secret JSON; Blindfold rejects a body that
-contains the selected secret or another detected credential instead of forwarding it.
-
-Pass secrets through environment variables. Managed child stdin is currently disabled.
-
-## Use Case 9: Check Changes Before Committing
-
-Check current tracked changes:
-
-```sh
-blindfold diff-check
-```
-
-Check staged changes:
-
-```sh
-blindfold diff-check --staged
-```
-
-Use this before `git commit` or in CI. Exit code `2` means a possible secret was found
-in an added line.
-
-## Use Case 10: Store a Temporary Secret Reference
-
-The vault is an advanced preview. For local evaluation:
+Masking keeps a local encrypted mapping and emits only opaque references:
 
 ```sh
 export BLINDFOLD_MASTER_KEY="$(openssl rand -hex 32)"
-export DEMO_API_KEY='your-value'
-blindfold vault put-env DEMO_API_KEY --ttl-seconds 3600
+bf mask .env --ttl-seconds 3600
+bf mask config.json --output config.masked.json
 ```
 
-List safe references:
+Within one invocation, equal values receive the same SafeRef. Email and phone findings
+receive PII references, private keys receive private-key references, and other findings
+receive secret references. The key must be supplied again to reopen the vault; do not
+place it in the project.
+
+## Give One Command A Secret
 
 ```sh
-blindfold vault list
+export DEMO_API_KEY='sk-proj-fake-blindfold-example-1234567890'
+bf exec --secret DEMO_API_KEY -- sh -c 'test -n "$DEMO_API_KEY"; echo ready'
 ```
 
-Clear the current vault scope:
+The child receives the selected plaintext value and is trusted for that grant. Blindfold
+uses a minimal environment, rejects the secret in command arguments, captures output,
+and removes exact injected values before printing it. This is not a process sandbox.
+
+## Make One Brokered HTTP Call
 
 ```sh
-blindfold vault clear --yes
+export STRIPE_SECRET_KEY='sk_test_fake_blindfold_example_1234567890'
+bf allow domain api.stripe.com
+bf call --secret STRIPE_SECRET_KEY \
+  --url https://api.stripe.com/v1/customers
 ```
 
-The OS keychain integration is not implemented. Do not store
-`BLINDFOLD_MASTER_KEY` in a project file.
+Blindfold inserts the selected value only as a bearer credential for the approved host,
+bounds and sanitizes the response, and records no request/response payload in traces.
 
-## Everyday Workflow
-
-For most development sessions, this is enough:
+## Run A Coding Agent
 
 ```sh
-# Start your agent
-blindfold run --guard codex -- exec "summarize this repo"
-
-# Before committing
-blindfold diff-check
-blindfold scan .
+bf run claude -- --print "summarize this repository"
+bf run codex -- exec "find the failing test"
+bf run codex -- review
+bf run opencode -- run "inspect this project"
 ```
 
-Or activate the shell wrapper once and continue using `codex` normally:
+Only these noninteractive command families are accepted. The runner clears the parent
+environment, configures an ephemeral provider proxy, starts proxy-aware destination
+control, and captures sanitized stdout/stderr. Unsupported command modes fail before
+the child starts.
+
+Each built-in adapter also resolves the exact executable and requires a compatible
+version before the proxy or agent starts:
+
+| Harness | Accepted version |
+|---|---|
+| Claude Code | `2.1.152` |
+| Codex CLI | `0.144.1` |
+| OpenCode | `1.17.3` |
+
+Missing, ambiguous, and different version output blocks the run. Version output proves
+compatibility only; it does not authenticate the executable. Future releases remain
+blocked until their traffic and tool behavior is tested.
+
+Unknown domains observed through the egress proxy block by default:
 
 ```sh
-eval "$(blindfold shell-init zsh)"
-codex exec "summarize this repo"
+bf allow domain api.example.com
+bf status
+bf deny domain api.example.com
 ```
 
-## What Blindfold Does Not Do Yet
+The runner does not mediate reads from the working directory or sockets opened by a
+client that ignores proxy settings. An agent opening `.env` still reads its raw content.
+Use the native command directly to operate outside Blindfold; there is intentionally no
+Blindfold bypass flag.
 
-The coding-agent wrappers sanitize supported provider request and response traffic.
-They do not currently:
+## Python SDK
 
-- sanitize the interactive terminal display;
-- prevent an agent from directly reading project files;
-- prevent direct network access outside the managed proxy;
-- broker environment-only provider credentials into the proxy; or
-- provide an operating-system sandbox.
+```python
+from blindfold import Boundary
+from openai import OpenAI
 
-`--strict` refuses to start while those controls are unavailable. Blindfold should be
-treated as a managed traffic boundary, not complete agent isolation.
+with Boundary(
+    secrets=["sk_test_fake_blindfold_1234567890"],
+    pii=["alice@example.test"],
+) as boundary:
+    client = boundary.wrap(OpenAI())
+    response = client.responses.create(
+        model="gpt-5",
+        input="Use sk_test_fake_blindfold_1234567890 for alice@example.test",
+    )
+    user_text = boundary.restore(response.output_text, destination="end_user")
+```
 
-Automatic PII discovery is also not implemented. Do not rely on `scan`, `redact`, the
-proxy, or MCP preview to identify arbitrary names, emails, addresses, or other PII.
+The wrapper masks registered strings in outbound arguments and inbound supported
+results. PII restoration requires `end_user`; secrets are never restored to normal
+output. The SDK is an in-process boundary and does not intercept arbitrary files,
+environment access, or unwrapped network clients.
 
-## Getting Help
+## Trace Without Payloads
 
 ```sh
-blindfold --help
-blindfold run --help
-blindfold redact --help
-blindfold exec --help
+bf redact .env --trace
+bf run codex --trace -- exec "summarize this repo"
+bf trace list
+bf trace tail
+bf trace export req_... --redacted
 ```
 
-For full details, see [README.md](README.md). For wrapper internals and custom gateways,
-see [docs/coding-agents.md](docs/coding-agents.md).
+Trace records contain closed route, coverage, outcome, byte-count, category, and
+structural-pointer fields. They contain no payload, credential header, query string, or
+raw detector span.
+
+## Current Guarantee Boundary
+
+For supported operations routed through Blindfold, detected or registered values are
+removed, masked, or blocked at the managed boundary. This does not guarantee detection
+of every unknown secret and does not contain an agent process that can read the host
+filesystem or bypass proxy settings. The exact contract is maintained in
+[Guarantees and Limitations](docs/guarantees.md).

@@ -1,153 +1,196 @@
 # Threat Model
 
-## Purpose
+## Status And Objective
 
-Blindfold is a local boundary that reduces accidental disclosure of credentials and
-sensitive data while AI coding agents use supported tools. This document describes the
-intended `v0.1.0` design. The current pre-release skeleton does not yet implement these
-controls.
+This document describes the implemented `v0.1.0` managed boundary. Blindfold removes,
+masks, or blocks detected and application-registered values on supported paths before
+they reach an LLM, agent-visible managed output, diagnostics, audit, or trace storage.
+Plaintext restoration is limited to an independently authorized trusted operation and
+destination.
 
-## Security Objective
+This is not whole-agent containment. `bf run` protects accepted provider traffic and
+captured process output; it does not prevent the agent from reading host files or opening
+a socket that ignores proxy settings.
 
-For traffic and operations actually routed through a supported Blindfold component,
-detected raw values should not reach an untrusted LLM destination, agent-visible managed
-output, Blindfold logs, audit records, or diagnostics. Restoration is allowed only into a
-destination explicitly trusted by policy.
+The strict harness-manifest parser/host and built-in version gates from ADR 0009 are
+implemented. External adapter execution and native tool hooks are not. This does not
+change the current managed-boundary objective.
 
-This objective is scoped to the managed boundary. It is not a claim of whole-machine
-containment or perfect secret detection.
+## Protected Assets
 
-## Assets
+- detected credentials, tokens, passwords, private keys, credential-bearing URLs,
+  RFC-valid email addresses, and valid international phone numbers;
+- secrets and PII explicitly registered with an application SDK;
+- caller-selected environment values used by `bf exec` or `bf call`;
+- vault master keys, encrypted mappings, scoped SafeRefs, and expiry metadata;
+- policy, audit, and payload-free trace integrity; and
+- an accurate account of which paths are managed or unmediated.
 
-- credentials, tokens, private keys, certificates, and credential-bearing URLs;
-- caller-identified PII supplied to the preview SDK; automatic PII discovery is not
-  currently implemented;
-- vault encryption keys and SafeRef mappings;
-- policy configuration and audit integrity;
-- sanitized prompts, responses, and command output; and
-- an accurate description of which paths are protected.
+Names, addresses, national identifiers, account numbers, encrypted content, transformed
+secrets, and other semantic sensitive facts are not automatically detected.
 
-## Actors
+## Trust Boundaries
 
-- **User:** configures Blindfold and authorizes operations.
-- **Agent/model:** untrusted for raw secrets; may make mistakes or attempt to solicit
-  sensitive data.
-- **Approved local process:** trusted only for the specific values and operation granted
-  by policy.
-- **LLM or API provider:** external and untrusted for values policy does not permit.
-- **Tool or MCP server:** untrusted unless a destination and field are explicitly trusted.
-- **Local attacker:** another process or user with access to the account or machine.
-- **Dependency/upstream:** code or services that may be vulnerable, compromised, or log
-  unexpected input.
+Trusted:
 
-## Trust Boundaries and Data Flow
+- the Blindfold process and its detector, policy, proxy, vault, execution, and broker
+  components;
+- the operating system, kernel, user account, and release artifact;
+- a child process only for a specific secret explicitly granted through `bf exec`; and
+- a remote API only for the exact value intentionally sent by `bf call` or provider
+  authentication.
 
-```text
-untrusted agent
-      |
-      | managed prompt, file/tool result, or command request
-      v
-Blindfold ingress -> detector -> policy -> redaction/SafeRef
-      |                                  |
-      | sanitized data                   | encrypted local mapping
-      v                                  v
-external provider or agent          vault + OS-protected key
+Untrusted:
 
-SafeRef + approved operation -> policy -> trusted local destination
-                                      -> sanitized result -> agent
+- agents, models, model responses, arbitrary tool output, repository content, and MCP
+  clients/servers unless an operation says otherwise;
+- unsupported provider protocols and media types; and
+- forged, expired, cross-project, or otherwise unauthorized SafeRefs;
+- harness-adapter manifests, hook payloads, harness version output, and all project-local
+  files that resemble plugin or adapter configuration; and
+- installed adapter metadata until core validates its schema, version, invocation, and
+  capability requirements for the current run.
+
+The current caller-supplied vault key is trusted but not OS-keychain managed. Agent
+persistent login stores are outside Blindfold and may be readable by the agent process.
+
+## Implemented Data Paths
+
+| Path | Protection | Plaintext recipient |
+|---|---|---|
+| `scan` | bounded detection; values never printed | Blindfold detector only |
+| `redact` | placeholder, schema, env-ref, surrogate, or block | none |
+| `mask` | encrypted vault storage plus scoped opaque SafeRefs | Blindfold vault only |
+| `exec` | minimal env, selected injection, bounded captured-output redaction | explicitly selected child |
+| `call` | allowed-host bearer injection and bounded response redaction | explicitly allowed API |
+| provider proxy | recursive JSON sanitization in both directions | allowlisted provider receives sanitized payload plus its own auth |
+| agent runner | clean parent env, managed provider route, proxy-aware egress policy, captured output | supported noninteractive agent receives no parent env secrets |
+| MCP stdio | recursive agent-bound sanitization; CLI restoration denied | no plaintext restoration in CLI preview |
+| Python SDK | registered strings protected in supported request and response shapes | PII may restore only to `end_user` |
+| TypeScript SDK | explicitly registered strings tokenized before the caller sends them | PII may restore only to `end_user` |
+
+Secrets are never restored into ordinary model, log, memory, or user output by either
+SDK. SafeRef syntax is not authorization.
+
+## Agent Runner Contract
+
+The runner accepts only:
+
+```sh
+bf run claude -- --print "prompt"
+bf run codex -- exec "prompt"
+bf run codex -- review
+bf run opencode -- run "prompt"
 ```
 
-Blindfold's trusted computing base includes its process, policy, detector and redaction
-logic, vault implementation, selected OS credential service, and dependencies handling
-sensitive data. The agent, model, provider, and general tool output are untrusted.
+Interactive/TUI, resume, server, remote-control, plugin, search, and permission-bypass
+modes fail before launch. There is no Blindfold runner bypass switch or shell wrapper.
 
-## Entry Points
+Accepted provider protocols are restricted to:
 
-- LLM requests and responses accepted by the local proxy;
-- supported file and tool reads routed through a wrapper or broker;
-- command arguments, selected environment values, stdout, and stderr handled by
-  `blindfold exec`;
-- configuration and policy files;
-- vault and audit commands;
-- future MCP requests and responses; and
-- generated changes scanned by future diff checks.
+- JSON POST bodies;
+- bounded Anthropic response SSE on `messages`; and
+- JSON-object text messages on the OpenAI Responses WebSocket.
 
-## Assumptions
+SSE requests, OpenAI SSE, unknown content types, sensitive JSON keys, non-POST HTTP,
+arbitrary WebSocket paths, opaque/binary frames, nonempty control frames, and proxy-loop
+markers fail closed. Responses are fully bounded before release, so split values cannot
+escape at network chunk boundaries.
 
-- the operating system, kernel, user account, Blindfold binary, and configured OS
-  credential service are not compromised;
-- users route protected operations through supported Blindfold integrations;
-- release artifacts and dependencies are obtained through a trusted channel;
-- policy and local configuration are not maliciously modified by an attacker with the
-  user's permissions;
-- fake test values are never valid credentials; and
-- upstream protocol behavior remains within the supported and tested subset.
+## Explicitly Unmediated Paths
 
-## In-Scope Threats
+During `bf run`, Blindfold does not mediate:
 
-| Threat | Planned mitigation |
+- reads of `.env`, workspace files, `~/.ssh`, `~/.aws`, `.netrc`, agent login stores, or
+  any other file available to the current user;
+- direct TCP, UDP, DNS, Unix-socket, IPC, or subprocess activity that ignores configured
+  proxy variables;
+- transformations or exfiltration performed by a process intentionally given plaintext;
+- requests made outside the supported Blindfold command/SDK/proxy path; or
+- memory inspection, swap, debuggers, a compromised OS/account, hardware, or side
+  channels.
+
+Trace records mark runner sessions degraded with `direct_filesystem_unmediated`. They
+cannot observe what an agent read from disk or sent through an unmediated socket.
+
+## Harness Adapter Threats
+
+Harness adapters are declarative TOML data. Any future external adapter must be
+explicitly installed by the user. Blindfold must never auto-load a project-local
+manifest or load an adapter as an in-process dynamic library. A manifest may reference a
+contained out-of-process entrypoint, but validation alone does not authorize execution
+or grant capabilities. Core enforcement remains non-pluggable.
+
+An adapter-backed launch must fail before starting the child when its manifest schema or
+plugin protocol, harness compatibility version, noninteractive command grammar, or
+required capability is unknown or incompatible. Repository content and agent output
+cannot grant an adapter capability.
+
+Future supported tool-result hooks could reduce one exposure path by routing bounded
+results through the core sanitizer before the next model call. Hook payloads would be
+untrusted, and a hook would not prove that every tool path was observed. The provider
+proxy remains the final check for supported model traffic. A malicious tool can still
+send data directly over TCP, UDP, DNS, Unix sockets, IPC, or another unmediated path;
+preventing that requires OS-enforced containment.
+
+Adapter control status:
+
+| Threat | Control and status |
 |---|---|
-| Raw value in a managed prompt or response | Structured normalization, detection, redaction, and response scanning |
-| Raw value in managed tool or shell output | Streaming sanitization with bounded overlap before release |
-| Blindfold logs or errors capture payloads | Safe structured fields; raw payload logging disabled by construction |
-| Unauthorized SafeRef restoration | Opaque scoped references plus destination-aware policy |
-| Forged, replayed, expired, or cross-project SafeRef | Validation, scope binding, expiry, and deny-by-default restoration |
-| Malformed or unsupported sensitive input bypasses checks | Fail closed with a redacted diagnostic |
-| Proxy becomes remotely reachable | Loopback default; explicit authenticated configuration for other binds |
-| Secret reaches an unintended child | Explicit allowlist and minimal child environment |
-| Vault files disclose mappings | Authenticated encryption; key protected separately by the OS credential service |
-| Dependency vulnerability or incompatible license | `cargo audit`, `cargo deny`, review, and minimal dependencies |
-| Credential committed to the repository | Redacted Gitleaks CI plus isolated, explicitly allowed fake fixtures |
-| Split value evades stream scanning | Bounded buffering and tests at every supported split boundary |
+| Malicious project adapter/plugin manifest | explicit-directory-only host loading implemented; CLI installation/activation pending |
+| Malformed manifest or escaping entrypoint | strict bounded TOML, symlink rejection, and canonical containment implemented |
+| Unknown or incompatible harness | exact compatibility-version probe implemented for built-in runs; this does not authenticate the executable |
+| Adapter requests unavailable control | exact built-in capability validation implemented; external execution pending |
+| Hook bypass or unsupported tool-result shape | native hooks pending; provider proxy remains final model check |
+| Tool sends data outside model path | OS network/process isolation not implemented |
 
-## Non-Goals and Out-of-Scope Threats
+## In-Scope Threats And Controls
 
-For `v0.1.0`, Blindfold does not protect against:
-
-- a compromised OS, kernel, shell, user account, Blindfold binary, or credential service;
-- memory scraping, swap inspection, debugger access, hardware attacks, or side channels;
-- a malicious approved child process intentionally exfiltrating a provided secret;
-- direct filesystem, network, provider, tool, or subprocess access that bypasses
-  Blindfold;
-- transparent TLS interception or system-wide network enforcement;
-- perfect detection of unknown, encrypted, heavily transformed, or semantically hidden
-  values;
-- denial of service by an agent, provider, tool, or local process;
-- malicious repository content exploiting software outside Blindfold; or
-- Windows security guarantees or production support.
-
-Strict mode may reject known degraded configurations, but `v0.1.0` does not provide a
-container or OS sandbox, egress firewall, brokered filesystem, or process-tree
-containment.
+| Threat | Implemented control |
+|---|---|
+| Raw value in accepted provider JSON | recursive string-value sanitization; sensitive keys reject the exchange |
+| Raw value split across SSE chunks or WebSocket fragments | bounded full response collection or reassembled text-message parsing |
+| Opaque transport bypass | narrow route/method/media grammar and fail-closed rejection |
+| Raw value in managed child output | bounded concurrent capture and exact/detector redaction before printing |
+| Inherited parent env secrets | child `env_clear` plus operational allowlist |
+| Forged/replayed SafeRef | random syntax, authenticated vault, project/session scope, kind and expiry checks |
+| Secret in trace/audit/error | closed schemas without payload/header/query fields and safe static errors |
+| Remote proxy exposure | CLI listeners bind to ephemeral loopback addresses |
+| Unsafe output overwrite | create-new default and explicit atomic `--force` replacement |
+| Committed secret | diff scanning, Gitleaks CI, and isolated synthetic fixtures |
 
 ## Residual Risks
 
-- Detector false negatives can allow a raw value through a managed path.
-- Detector false positives can block or alter benign data.
-- Streaming output may require buffering that affects latency and availability.
-- Labels, paths, timing, finding counts, and SafeRef use can reveal metadata even when
-  values are hidden.
-- OS keychain behavior and desktop/session availability differ across macOS and Linux.
-- A dependency may unexpectedly format, serialize, retain, or transmit sensitive data.
-- Users may misunderstand degraded startup status or configure an unprotected bypass.
-- Encrypted vault artifacts may remain in filesystem backups after local deletion.
+- Detector false negatives can pass an unknown or transformed value on a managed path.
+- Detector false positives can alter or reject benign data.
+- Provider authentication headers intentionally reach their named provider.
+- Fully buffering accepted SSE improves split-boundary safety but increases latency and
+  denial-of-service pressure within configured limits.
+- Labels, timing, counts, SafeRef use, and safe structural locations reveal metadata.
+- Encrypted vault records can remain in filesystem backups after local deletion.
+- The caller-managed vault key and persistent agent credentials are not yet isolated by
+  an OS credential broker.
 
 ## Security Invariants
 
-1. Raw values are redacted before managed logs, traces, metrics labels, audit records,
-   errors, or user-visible diagnostics.
-2. Raw-value types do not expose unsafe default `Debug`, `Display`, or serialization.
-3. Telemetry is off by default and excludes payloads and sensitive metadata if added.
-4. Restoration requires both an authorized operation and a trusted destination.
+1. Raw-value types do not expose plaintext through ordinary formatting or serialization.
+2. Accepted managed payloads are sanitized or rejected before forwarding.
+3. SafeRefs contain random opaque IDs and are non-authorizing by themselves.
+4. Restoration requires scope, lifetime, operation, destination, and vault checks.
 5. Unsupported security-sensitive input fails closed.
-6. Proxy listeners bind to loopback by default.
-7. Child processes receive only explicitly approved secrets and environment variables.
-8. Audit records contain SafeRefs or keyed fingerprints, never raw values.
-9. Tests use fake isolated fixtures and search outputs and artifacts for fixture values.
-10. Startup diagnostics accurately identify protected, degraded, and unprotected paths.
+6. Managed listeners are loopback-only in current CLI use.
+7. Audit, trace, error, and diagnostic schemas cannot contain arbitrary payloads.
+8. Tests use synthetic fixtures and search all managed outputs/artifacts for raw values.
+9. Startup and documentation identify filesystem and direct-network gaps explicitly.
+10. Whole-agent containment is never claimed without OS-enforced workspace, process,
+    credential, IPC, and network isolation.
+11. Adapter manifests are non-authorizing data and cannot replace core enforcement.
+12. No project-owned adapter or plugin is activated without explicit user install.
 
 ## Review Triggers
 
-Update this model before adding a restoration destination, remote listener, new vault or
-key backend, telemetry, Windows support, sandbox claim, protocol integration, or feature
-that changes which process can receive plaintext.
+Update this model before adding a plaintext restoration destination, provider protocol,
+remote listener, vault/key backend, automatic detector category, agent command family,
+filesystem mediation, OS sandbox, telemetry, or supported platform.
+Harness manifest schema changes, install/discovery behavior, hook capability changes,
+or making any enforcement component pluggable are also mandatory review triggers.

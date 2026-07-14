@@ -4,11 +4,13 @@ use std::{
     env, fs,
     net::{IpAddr, TcpListener},
     path::Path,
-    process::Command,
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use crate::config::{self, CONFIG_FILE, Config, LOCAL_CONFIG_FILE};
+use crate::{
+    agent_adapter::HarnessAdapter,
+    config::{self, CONFIG_FILE, Config, LOCAL_CONFIG_FILE},
+};
 
 pub(crate) struct DoctorReport {
     checks: Vec<Check>,
@@ -97,7 +99,7 @@ pub(crate) fn run(root: &Path) -> DoctorReport {
             },
             Check {
                 label: "Claude compatibility",
-                outcome: check_agent_version(&config.claude.command, &["--version"], "Claude Code"),
+                outcome: check_adapter_contract("claude"),
             },
             Check {
                 label: "Codex command",
@@ -105,7 +107,7 @@ pub(crate) fn run(root: &Path) -> DoctorReport {
             },
             Check {
                 label: "Codex compatibility",
-                outcome: check_codex_guard_compatibility(),
+                outcome: check_adapter_contract("codex"),
             },
             Check {
                 label: "OpenCode command",
@@ -113,7 +115,7 @@ pub(crate) fn run(root: &Path) -> DoctorReport {
             },
             Check {
                 label: "OpenCode compatibility",
-                outcome: check_agent_version("opencode", &["--version"], ""),
+                outcome: check_adapter_contract("opencode"),
             },
         ],
     }
@@ -211,40 +213,11 @@ fn check_optional_command(command: &str) -> Outcome {
     }
 }
 
-fn check_codex_guard_compatibility() -> Outcome {
-    match check_optional_command("codex") {
-        Outcome::Info(_) => Outcome::Info("not installed; compatibility not checked"),
-        Outcome::Fail(message) => Outcome::Fail(message),
-        Outcome::Pass(_) => {
-            Outcome::Pass("installed; HTTP and responses WebSocket Guard available")
-        }
+fn check_adapter_contract(name: &str) -> Outcome {
+    match HarnessAdapter::load(name) {
+        Ok(_) => Outcome::Pass("built-in manifest valid; executable version is checked at run"),
+        Err(error) => Outcome::Fail(error.to_string()),
     }
-}
-
-fn check_agent_version(command: &str, args: &[&str], expected_marker: &str) -> Outcome {
-    if matches!(check_optional_command(command), Outcome::Info(_)) {
-        return Outcome::Info("not installed; compatibility not checked");
-    }
-    let Ok(output) = Command::new(command).args(args).output() else {
-        return Outcome::Info("version command could not be executed");
-    };
-    if !output.status.success() {
-        return Outcome::Info("version command returned non-zero status");
-    }
-    let mut version = String::from_utf8_lossy(&output.stdout).trim().to_owned();
-    if version.is_empty() {
-        String::from_utf8_lossy(&output.stderr)
-            .trim()
-            .clone_into(&mut version);
-    }
-    let first_line = version.lines().next().unwrap_or_default().trim();
-    if first_line.is_empty() {
-        return Outcome::Info("installed; version output empty");
-    }
-    if !expected_marker.is_empty() && !first_line.contains(expected_marker) {
-        return Outcome::Info("installed; version format is unrecognized");
-    }
-    Outcome::Pass("installed; supported guard forms require explicit non-interactive mode")
 }
 
 #[cfg(unix)]

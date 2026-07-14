@@ -4,6 +4,7 @@
 
 use std::process::ExitCode;
 
+mod agent_adapter;
 mod commands;
 mod config;
 mod doctor;

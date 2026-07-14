@@ -1,0 +1,23 @@
+manifest_version = 1
+id = "dev.blindfold.codex-cli"
+version = "0.1.0"
+kind = "harness-adapter"
+protocol = "builtin-v1"
+entrypoint = "builtin/codex-cli"
+
+[harness]
+command = "codex"
+version = "=0.144.1"
+noninteractive_modes = ["exec", "review"]
+
+[capabilities]
+providers = ["open-ai"]
+transports = ["http-json", "web-socket"]
+events = ["model-request", "model-response", "command-output"]
+
+[permissions]
+filesystem = ["workspace-read", "workspace-write", "session-temp"]
+network = ["model-proxy", "policy-egress"]
+environment = ["path", "home", "temp", "locale", "terminal", "user-identity", "shell", "host-config"]
+spawn_harness = true
+spawn_tools = true

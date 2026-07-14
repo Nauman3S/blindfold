@@ -24,7 +24,17 @@ use tokio::{
     net::TcpListener,
     sync::{mpsc, oneshot},
 };
-use tokio_tungstenite::{accept_async, connect_async, tungstenite::Message as WsMessage};
+use tokio_tungstenite::{
+    accept_async, connect_async,
+    tungstenite::{
+        Message as WsMessage,
+        client::IntoClientRequest,
+        protocol::frame::{
+            Frame,
+            coding::{Data, OpCode},
+        },
+    },
+};
 use tokio_util::sync::CancellationToken;
 
 const SECRET: &str = "raw-secret-value";
@@ -164,7 +174,7 @@ async fn provider_authentication_header_is_forwarded_to_allowlisted_upstream()
 }
 
 #[tokio::test]
-async fn websocket_frames_are_sanitized_in_both_directions()
+async fn fragmented_websocket_json_is_reassembled_and_sanitized_in_both_directions()
 -> Result<(), Box<dyn std::error::Error>> {
     let listener = TcpListener::bind("127.0.0.1:0").await?;
     let upstream_address = listener.local_addr()?;
@@ -180,16 +190,44 @@ async fn websocket_frames_are_sanitized_in_both_directions()
             return;
         };
         let _ = capture_tx.send(text.to_string()).await;
+        let response = format!(r#"{{"delta":"echo {SECRET}"}}"#);
+        let Some(split) = response.find(SECRET).map(|index| index + 7) else {
+            return;
+        };
         let _ = socket
-            .send(WsMessage::Text(format!("echo {SECRET}").into()))
+            .send(WsMessage::Frame(Frame::message(
+                Bytes::copy_from_slice(&response.as_bytes()[..split]),
+                OpCode::Data(Data::Text),
+                false,
+            )))
+            .await;
+        let _ = socket
+            .send(WsMessage::Frame(Frame::message(
+                Bytes::copy_from_slice(&response.as_bytes()[split..]),
+                OpCode::Data(Data::Continue),
+                true,
+            )))
             .await;
     });
     let (proxy, proxy_stop) = spawn_proxy(upstream_address, Provider::OpenAi).await?;
 
     let websocket_url = proxy.replacen("http://", "ws://", 1) + "/openai/v1/responses";
     let (mut client, _) = connect_async(websocket_url).await?;
+    let request = format!(r#"{{"input":"send {SECRET}"}}"#);
+    let split = request.find(SECRET).ok_or("fixture missing")? + 7;
     client
-        .send(WsMessage::Text(format!("send {SECRET}").into()))
+        .send(WsMessage::Frame(Frame::message(
+            Bytes::copy_from_slice(&request.as_bytes()[..split]),
+            OpCode::Data(Data::Text),
+            false,
+        )))
+        .await?;
+    client
+        .send(WsMessage::Frame(Frame::message(
+            Bytes::copy_from_slice(&request.as_bytes()[split..]),
+            OpCode::Data(Data::Continue),
+            true,
+        )))
         .await?;
     let upstream_text = capture_rx.recv().await.ok_or("missing upstream frame")?;
     assert!(!upstream_text.contains(SECRET));
@@ -201,6 +239,134 @@ async fn websocket_frames_are_sanitized_in_both_directions()
     assert!(client_text.contains("[REDACTED]"));
 
     proxy_stop.cancel();
+    Ok(())
+}
+
+#[tokio::test]
+async fn websocket_rejects_opaque_text_without_forwarding_it()
+-> Result<(), Box<dyn std::error::Error>> {
+    let listener = TcpListener::bind("127.0.0.1:0").await?;
+    let upstream_address = listener.local_addr()?;
+    let (capture_tx, mut capture_rx) = mpsc::channel(1);
+    tokio::spawn(async move {
+        let Ok((stream, _)) = listener.accept().await else {
+            return;
+        };
+        let Ok(mut socket) = accept_async(stream).await else {
+            return;
+        };
+        if let Some(Ok(WsMessage::Text(text))) = socket.next().await {
+            let _ = capture_tx.send(text.to_string()).await;
+        }
+    });
+    let (proxy, proxy_stop) = spawn_proxy(upstream_address, Provider::OpenAi).await?;
+    let websocket_url = proxy.replacen("http://", "ws://", 1) + "/openai/v1/responses";
+    let (mut client, _) = connect_async(websocket_url).await?;
+
+    client.send(WsMessage::Text(SECRET.into())).await?;
+    let forwarded = tokio::time::timeout(Duration::from_millis(250), capture_rx.recv()).await;
+    assert!(!matches!(forwarded, Ok(Some(_))));
+
+    proxy_stop.cancel();
+    Ok(())
+}
+
+#[tokio::test]
+async fn websocket_loop_marker_is_rejected_before_connecting_upstream()
+-> Result<(), Box<dyn std::error::Error>> {
+    let listener = TcpListener::bind("127.0.0.1:0").await?;
+    let upstream_address = listener.local_addr()?;
+    let (proxy, proxy_stop) = spawn_proxy(upstream_address, Provider::OpenAi).await?;
+    let websocket_url = proxy.replacen("http://", "ws://", 1) + "/openai/v1/responses";
+    let mut request = websocket_url.into_client_request()?;
+    request
+        .headers_mut()
+        .insert("x-blindfold-proxy-hop", HeaderValue::from_static("1"));
+
+    let Err(error) = connect_async(request).await else {
+        return Err("loop-marked WebSocket unexpectedly connected".into());
+    };
+    let tokio_tungstenite::tungstenite::Error::Http(response) = error else {
+        return Err("loop-marked WebSocket returned an unexpected error".into());
+    };
+    assert_eq!(response.status(), StatusCode::LOOP_DETECTED);
+    assert!(
+        tokio::time::timeout(Duration::from_millis(250), listener.accept())
+            .await
+            .is_err()
+    );
+
+    proxy_stop.cancel();
+    Ok(())
+}
+
+#[tokio::test]
+async fn sensitive_json_request_key_fails_closed_without_trace_or_upstream_leak()
+-> Result<(), Box<dyn std::error::Error>> {
+    let capture = Capture::default();
+    let traces = TraceCapture::default();
+    let (upstream, upstream_stop) = spawn_upstream(capture.clone(), openai_response()).await?;
+    let config = proxy_config(upstream, Provider::OpenAi)?;
+    let sanitizer = Arc::new(ExactValueSanitizer::new(SECRET, "[REDACTED]")?);
+    let bound = Proxy::new(config, sanitizer)?
+        .with_trace_sink(Arc::new(traces.clone()))
+        .bind()
+        .await?;
+    let address = bound.local_addr();
+    let proxy_stop = CancellationToken::new();
+    let serving_token = proxy_stop.clone();
+    tokio::spawn(async move {
+        let _ = bound.serve(serving_token).await;
+    });
+
+    let response = reqwest::Client::new()
+        .post(format!("http://{address}/openai/v1/chat/completions"))
+        .header(CONTENT_TYPE, "application/json")
+        .body(format!(r#"{{"{SECRET}":"value"}}"#))
+        .send()
+        .await?;
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert!(!response.text().await?.contains(SECRET));
+    assert!(
+        capture
+            .bodies
+            .lock()
+            .map_err(|_| "capture poisoned")?
+            .is_empty()
+    );
+    let records = traces
+        .records
+        .lock()
+        .map_err(|_| "trace capture poisoned")?;
+    assert_eq!(records.len(), 1);
+    assert!(!records[0].to_json()?.contains(SECRET));
+
+    proxy_stop.cancel();
+    let _ = upstream_stop.send(());
+    Ok(())
+}
+
+#[tokio::test]
+async fn sensitive_json_response_key_fails_closed_without_client_leak()
+-> Result<(), Box<dyn std::error::Error>> {
+    let capture = Capture::default();
+    let response = json_response(&serde_json::json!({ (SECRET): "value" }))?;
+    let (upstream, upstream_stop) = spawn_upstream(capture, response).await?;
+    let (proxy, proxy_stop) = spawn_proxy(upstream, Provider::OpenAi).await?;
+
+    let response = reqwest::Client::new()
+        .post(format!("{proxy}/openai/v1/chat/completions"))
+        .header(CONTENT_TYPE, "application/json")
+        .body("{}")
+        .send()
+        .await?;
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body = response.text().await?;
+    assert!(!body.contains(SECRET));
+    assert!(body.contains("invalid_json"));
+
+    proxy_stop.cancel();
+    let _ = upstream_stop.send(());
     Ok(())
 }
 
@@ -361,6 +527,59 @@ async fn split_sse_chunks_are_withheld_and_sanitized() -> Result<(), Box<dyn std
 }
 
 #[tokio::test]
+async fn rejects_sse_requests_before_the_upstream() -> Result<(), Box<dyn std::error::Error>> {
+    let capture = Capture::default();
+    let (upstream, upstream_stop) = spawn_upstream(capture.clone(), openai_response()).await?;
+    let (proxy, proxy_stop) = spawn_proxy(upstream, Provider::Anthropic).await?;
+
+    let response = reqwest::Client::new()
+        .post(format!("{proxy}/anthropic/v1/messages"))
+        .header(CONTENT_TYPE, "text/event-stream")
+        .body(format!("data: {{\"text\":\"{SECRET}\"}}\n\n"))
+        .send()
+        .await?;
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert!(response.text().await?.contains("invalid_request"));
+    assert!(
+        capture
+            .bodies
+            .lock()
+            .map_err(|_| "capture poisoned")?
+            .is_empty()
+    );
+
+    proxy_stop.cancel();
+    let _ = upstream_stop.send(());
+    Ok(())
+}
+
+#[tokio::test]
+async fn rejects_openai_sse_responses() -> Result<(), Box<dyn std::error::Error>> {
+    let capture = Capture::default();
+    let response = streamed_response(
+        [Bytes::from(format!("data: {{\"delta\":\"{SECRET}\"}}\n\n"))],
+        "text/event-stream",
+    );
+    let (upstream, upstream_stop) = spawn_upstream(capture, response).await?;
+    let (proxy, proxy_stop) = spawn_proxy(upstream, Provider::OpenAi).await?;
+
+    let response = reqwest::Client::new()
+        .post(format!("{proxy}/openai/v1/chat/completions"))
+        .header(CONTENT_TYPE, "application/json")
+        .body("{}")
+        .send()
+        .await?;
+    assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+    let body = response.text().await?;
+    assert!(!body.contains(SECRET));
+    assert!(body.contains("upstream_failure"));
+
+    proxy_stop.cancel();
+    let _ = upstream_stop.send(());
+    Ok(())
+}
+
+#[tokio::test]
 async fn rejects_proxy_hop_marker() -> Result<(), Box<dyn std::error::Error>> {
     let capture = Capture::default();
     let (upstream, upstream_stop) = spawn_upstream(capture, openai_response()).await?;
@@ -498,7 +717,38 @@ async fn rejects_non_empty_unsupported_response_content_type()
 }
 
 #[tokio::test]
-async fn allows_empty_bodies_with_unsupported_content_types()
+async fn strips_untrusted_upstream_response_headers() -> Result<(), Box<dyn std::error::Error>> {
+    let capture = Capture::default();
+    let response = Response::builder()
+        .header(CONTENT_TYPE, "application/problem+json; charset=utf-8")
+        .header("x-upstream-secret", SECRET)
+        .body(Body::from(r#"{"error":"safe"}"#))?;
+    let (upstream, upstream_stop) = spawn_upstream(capture, response).await?;
+    let (proxy, proxy_stop) = spawn_proxy(upstream, Provider::OpenAi).await?;
+
+    let response = reqwest::Client::new()
+        .post(format!("{proxy}/openai/v1/chat/completions"))
+        .header(CONTENT_TYPE, "application/json")
+        .body("{}")
+        .send()
+        .await?;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response
+            .headers()
+            .get(CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok()),
+        Some("application/json")
+    );
+    assert!(!response.headers().contains_key("x-upstream-secret"));
+
+    proxy_stop.cancel();
+    let _ = upstream_stop.send(());
+    Ok(())
+}
+
+#[tokio::test]
+async fn rejects_empty_bodies_with_unsupported_content_types()
 -> Result<(), Box<dyn std::error::Error>> {
     let capture = Capture::default();
     let response = Response::builder()
@@ -513,15 +763,14 @@ async fn allows_empty_bodies_with_unsupported_content_types()
         .body(Vec::new())
         .send()
         .await?;
-    assert_eq!(response.status(), StatusCode::OK);
-    assert!(response.bytes().await?.is_empty());
-    assert_eq!(
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert!(response.text().await?.contains("invalid_request"));
+    assert!(
         capture
             .bodies
             .lock()
             .map_err(|_| "capture poisoned")?
-            .as_slice(),
-        &[Vec::<u8>::new()]
+            .is_empty()
     );
 
     proxy_stop.cancel();
@@ -546,7 +795,6 @@ fn proxy_config(
     };
     let mut config = Config {
         request_timeout: Duration::from_secs(5),
-        stream_overlap: SECRET.len(),
         ..Config::default()
     };
     config.upstreams.push(Upstream::new(

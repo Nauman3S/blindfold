@@ -1,6 +1,7 @@
 //! End-to-end tests for the `blindfold` binary.
 
 use std::{
+    env,
     error::Error,
     fs,
     io::{Read, Write},
@@ -15,6 +16,9 @@ use std::{
     thread,
     time::Duration,
 };
+
+use blindfold_core::SafeRef;
+use blindfold_vault::{MasterKey, Scope, Vault};
 
 static NEXT_TEMP: AtomicU64 = AtomicU64::new(0);
 const PROVIDER_FIXTURE: &str = "sk-proj-abcdefghijklmnopqrstuvwxyz012345";
@@ -44,10 +48,23 @@ impl Drop for TestDirectory {
 }
 
 fn blindfold(directory: &Path, arguments: &[&str]) -> Result<Output, std::io::Error> {
-    Command::new(env!("CARGO_BIN_EXE_blindfold"))
-        .args(arguments)
+    blindfold_command(directory).args(arguments).output()
+}
+
+fn blindfold_command(directory: &Path) -> Command {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_blindfold"));
+    command
         .current_dir(directory)
-        .output()
+        .env("PATH", test_path(directory));
+    command
+}
+
+fn test_path(directory: &Path) -> std::ffi::OsString {
+    let mut entries = vec![directory.to_path_buf()];
+    if let Some(parent) = env::var_os("PATH") {
+        entries.extend(env::split_paths(&parent));
+    }
+    env::join_paths(entries).unwrap_or_else(|_| directory.as_os_str().to_owned())
 }
 
 fn blindfold_with_input(
@@ -55,13 +72,25 @@ fn blindfold_with_input(
     arguments: &[&str],
     input: &str,
 ) -> Result<Output, std::io::Error> {
-    let mut child = Command::new(env!("CARGO_BIN_EXE_blindfold"))
+    blindfold_with_input_and_env(directory, arguments, input, &[])
+}
+
+fn blindfold_with_input_and_env(
+    directory: &Path,
+    arguments: &[&str],
+    input: &str,
+    environment: &[(&str, &str)],
+) -> Result<Output, std::io::Error> {
+    let mut command = blindfold_command(directory);
+    command
         .args(arguments)
-        .current_dir(directory)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()?;
+        .stderr(Stdio::piped());
+    for (name, value) in environment {
+        command.env(name, value);
+    }
+    let mut child = command.spawn()?;
     if let Some(stdin) = child.stdin.as_mut() {
         stdin.write_all(input.as_bytes())?;
     }
@@ -76,11 +105,37 @@ fn stderr(output: &Output) -> String {
     String::from_utf8_lossy(&output.stderr).into_owned()
 }
 
-fn fake_agent(directory: &Path) -> Result<PathBuf, std::io::Error> {
-    let path = directory.join("fake-agent");
+fn fake_agent(directory: &Path, agent: &str) -> Result<PathBuf, std::io::Error> {
+    let path = directory.join(agent);
+    let version = fake_agent_version(agent);
     fs::write(
         &path,
-        "#!/bin/sh\nprintf '%s\\n' \"$@\" > agent-args\nprintf '%s' \"${ANTHROPIC_BASE_URL-}\" > anthropic-base\nprintf '%s' \"${OPENCODE_CONFIG_CONTENT-}\" > opencode-config\nprintf '%s' \"${HTTPS_PROXY-}\" > https-proxy\nprintf '%s' \"${BLINDFOLD_MASTER_KEY-}\" > inherited-master-key\nprintf '%s' \"${UNRELATED_PARENT_SECRET-}\" > inherited-parent-secret\n",
+        format!(
+            "#!/bin/sh\nif [ \"${{1-}}\" = --version ]; then printf '%s\\n' '{version}'; exit 0; fi\nprintf '%s\\n' \"$@\" > agent-args\nprintf '%s' \"${{ANTHROPIC_BASE_URL-}}\" > anthropic-base\nprintf '%s' \"${{OPENCODE_CONFIG_CONTENT-}}\" > opencode-config\nprintf '%s' \"${{HTTPS_PROXY-}}\" > https-proxy\nprintf '%s' \"${{BLINDFOLD_MASTER_KEY-}}\" > inherited-master-key\nprintf '%s' \"${{UNRELATED_PARENT_SECRET-}}\" > inherited-parent-secret\n"
+        ),
+    )?;
+    let mut permissions = fs::metadata(&path)?.permissions();
+    permissions.set_mode(0o700);
+    fs::set_permissions(&path, permissions)?;
+    Ok(path)
+}
+
+fn fake_agent_version(agent: &str) -> &'static str {
+    match agent {
+        "claude" => "2.1.152 (Claude Code)",
+        "codex" => "codex-cli 0.144.1",
+        "opencode" => "1.17.3",
+        _ => "unsupported 0.0.0",
+    }
+}
+
+fn fake_incompatible_agent(directory: &Path, version: &str) -> Result<PathBuf, std::io::Error> {
+    let path = directory.join("codex");
+    fs::write(
+        &path,
+        format!(
+            "#!/bin/sh\nif [ \"${{1-}}\" = --version ]; then printf '%s\\n' 'codex-cli {version}'; exit 0; fi\nprintf started > agent-started\n"
+        ),
     )?;
     let mut permissions = fs::metadata(&path)?.permissions();
     permissions.set_mode(0o700);
@@ -89,10 +144,11 @@ fn fake_agent(directory: &Path) -> Result<PathBuf, std::io::Error> {
 }
 
 fn fake_connect_agent(directory: &Path) -> Result<PathBuf, std::io::Error> {
-    let path = directory.join("fake-connect-agent");
+    let path = directory.join("opencode");
     fs::write(
         &path,
         r#"#!/bin/sh
+if [ "${1-}" = --version ]; then printf '%s\n' '1.17.3'; exit 0; fi
 ruby -rsocket -ruri -e '
 proxy = URI(ENV.fetch("HTTPS_PROXY"))
 socket = TCPSocket.new(proxy.host, proxy.port)
@@ -110,13 +166,14 @@ socket.close
 }
 
 fn fake_leaky_agent(directory: &Path) -> Result<PathBuf, std::io::Error> {
-    let path = directory.join("fake-leaky-agent");
+    let path = directory.join("codex");
     let script = format!(
-        r"#!/bin/sh
+        r#"#!/bin/sh
+if [ "${{1-}}" = --version ]; then printf '%s\n' 'codex-cli 0.144.1'; exit 0; fi
 printf '%s\n' 'stdout {PROVIDER_FIXTURE}'
 printf '%s\n' 'stderr {PROVIDER_FIXTURE}' >&2
 exit 7
-"
+"#
     );
     fs::write(&path, script)?;
     let mut permissions = fs::metadata(&path)?.permissions();
@@ -126,9 +183,11 @@ exit 7
 }
 
 fn fake_provider_agent(directory: &Path, mode: &str) -> Result<PathBuf, std::io::Error> {
-    let path = directory.join(format!("fake-provider-agent-{mode}"));
+    let path = directory.join(mode);
+    let version = fake_agent_version(mode);
     let script = format!(
         r#"#!/bin/sh
+if [ "${{1-}}" = --version ]; then printf '%s\n' '{version}'; exit 0; fi
 ruby -rjson -rnet/http -ruri -e '
 mode = "{mode}"
 secret = "{PROVIDER_FIXTURE}"
@@ -310,6 +369,14 @@ fn help_and_version_are_available() -> Result<(), Box<dyn Error>> {
 
     assert!(help.status.success());
     assert!(stdout(&help).contains("doctor"));
+    assert!(stdout(&help).contains("mask"));
+    assert!(!stdout(&help).contains("shell-init"));
+    let run_help = blindfold(directory.path(), &["run", "--help"])?;
+    assert!(run_help.status.success());
+    assert!(!stdout(&run_help).contains("--guard"));
+    assert!(!stdout(&run_help).contains("--no-proxy"));
+    assert!(!stdout(&run_help).contains("--strict"));
+    assert!(!stdout(&run_help).contains("--agent-command"));
     assert!(version.status.success());
     assert_eq!(
         stdout(&version).trim(),
@@ -454,19 +521,9 @@ fn global_trace_flag_can_appear_before_or_after_subcommand() -> Result<(), Box<d
 #[test]
 fn traced_agent_session_reports_unmediated_file_reads() -> Result<(), Box<dyn Error>> {
     let directory = TestDirectory::new()?;
-    let agent = fake_agent(directory.path())?;
-    let output = Command::new(env!("CARGO_BIN_EXE_blindfold"))
-        .args([
-            "run",
-            "opencode",
-            "--trace",
-            "--agent-command",
-            agent.to_str().ok_or("non-UTF-8 agent path")?,
-            "--",
-            "run",
-            "trace-check",
-        ])
-        .current_dir(directory.path())
+    fake_agent(directory.path(), "opencode")?;
+    let output = blindfold_command(directory.path())
+        .args(["run", "opencode", "--trace", "--", "run", "trace-check"])
         .output()?;
 
     assert!(output.status.success(), "{}", stderr(&output));
@@ -481,22 +538,11 @@ fn traced_agent_session_reports_unmediated_file_reads() -> Result<(), Box<dyn Er
 }
 
 #[test]
-fn traced_guard_records_payload_free_egress_decisions() -> Result<(), Box<dyn Error>> {
+fn traced_boundary_records_payload_free_egress_decisions() -> Result<(), Box<dyn Error>> {
     let directory = TestDirectory::new()?;
-    let agent = fake_connect_agent(directory.path())?;
-    let output = Command::new(env!("CARGO_BIN_EXE_blindfold"))
-        .args([
-            "run",
-            "--guard",
-            "opencode",
-            "--trace",
-            "--agent-command",
-            agent.to_str().ok_or("non-UTF-8 agent path")?,
-            "--",
-            "run",
-            "connect-check",
-        ])
-        .current_dir(directory.path())
+    fake_connect_agent(directory.path())?;
+    let output = blindfold_command(directory.path())
+        .args(["run", "opencode", "--trace", "--", "run", "connect-check"])
         .output()?;
 
     assert!(output.status.success(), "{}", stderr(&output));
@@ -728,6 +774,177 @@ fn redact_output_refuses_overwrite_without_force() -> Result<(), Box<dyn Error>>
     )?;
     assert!(forced.status.success(), "{}", stderr(&forced));
     assert!(!fs::read_to_string(directory.path().join("safe.txt"))?.contains(raw));
+    Ok(())
+}
+
+#[test]
+fn mask_file_reuses_refs_and_keeps_artifacts_payload_free() -> Result<(), Box<dyn Error>> {
+    let directory = TestDirectory::new()?;
+    let raw = "sk-proj-abcdefghijklmnopqrstuvwxyz012345";
+    let email = "ada.fixture@example.com";
+    let phone = "+1-202-555-0142";
+    let input =
+        format!("PRIMARY={raw}\nREPEATED={raw}\nCUSTOMER_EMAIL={email}\nCUSTOMER_PHONE={phone}\n");
+    fs::write(directory.path().join("input.env"), &input)?;
+    let key = "11".repeat(32);
+    let output = Command::new(env!("CARGO_BIN_EXE_blindfold"))
+        .args(["mask", "input.env", "--trace"])
+        .env("BLINDFOLD_MASTER_KEY", &key)
+        .current_dir(directory.path())
+        .output()?;
+
+    assert!(output.status.success(), "{}", stderr(&output));
+    let masked = stdout(&output);
+    assert!(!masked.contains(raw));
+    assert!(!masked.contains(email));
+    assert!(!masked.contains(phone));
+    for sensitive in [raw, email, phone] {
+        assert!(!stderr(&output).contains(sensitive));
+    }
+    let values = masked
+        .lines()
+        .filter_map(|line| line.split_once('=').map(|(_, value)| value))
+        .collect::<Vec<_>>();
+    assert_eq!(values.len(), 4);
+    assert_eq!(values[0], values[1]);
+    assert_eq!(
+        SafeRef::parse(values[0])?.kind(),
+        blindfold_core::SafeRefKind::Secret
+    );
+    assert_eq!(
+        SafeRef::parse(values[2])?.kind(),
+        blindfold_core::SafeRefKind::PersonallyIdentifiableInformation
+    );
+    assert_eq!(
+        SafeRef::parse(values[3])?.kind(),
+        blindfold_core::SafeRefKind::PersonallyIdentifiableInformation
+    );
+
+    let list = Command::new(env!("CARGO_BIN_EXE_blindfold"))
+        .args(["vault", "list"])
+        .env("BLINDFOLD_MASTER_KEY", &key)
+        .current_dir(directory.path())
+        .output()?;
+    assert!(list.status.success(), "{}", stderr(&list));
+    assert_eq!(stdout(&list).lines().count(), 3);
+
+    let canonical_root = fs::canonicalize(directory.path())?;
+    let scope = Scope::new(canonical_root.to_string_lossy(), "default")?;
+    let vault = Vault::open(
+        directory.path().join(".blindfold/vault.bin"),
+        MasterKey::new([0x11; 32]),
+    )?;
+    assert_eq!(
+        vault
+            .resolve(&SafeRef::parse(values[0])?, &scope)?
+            .expose_secret(),
+        raw
+    );
+
+    let audit = blindfold(directory.path(), &["audit"])?;
+    assert!(audit.status.success(), "{}", stderr(&audit));
+    assert_eq!(stdout(&audit).lines().count(), 3);
+    let trace = blindfold(directory.path(), &["trace", "tail"])?;
+    assert!(trace.status.success(), "{}", stderr(&trace));
+    assert!(stdout(&trace).contains("activity: mask"));
+    for sensitive in [raw, email, phone] {
+        assert!(!stdout(&audit).contains(sensitive));
+        assert!(!stdout(&trace).contains(sensitive));
+    }
+
+    for entry in fs::read_dir(directory.path().join(".blindfold"))? {
+        let bytes = fs::read(entry?.path())?;
+        for sensitive in [raw, email, phone] {
+            assert!(
+                !bytes
+                    .windows(sensitive.len())
+                    .any(|window| window == sensitive.as_bytes()),
+                "Blindfold artifact contained raw input"
+            );
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn mask_stdin_maps_private_keys_and_pii_to_safe_ref_kinds() -> Result<(), Box<dyn Error>> {
+    let directory = TestDirectory::new()?;
+    let pem = "-----BEGIN PRIVATE KEY-----\nabc123+/=\n-----END PRIVATE KEY-----";
+    let email = "ada.fixture@example.com";
+    let input = format!("{pem}\nOWNER={email}\n");
+    let key = "22".repeat(32);
+    let output = blindfold_with_input_and_env(
+        directory.path(),
+        &["mask", "--ttl-seconds", "60"],
+        &input,
+        &[("BLINDFOLD_MASTER_KEY", &key)],
+    )?;
+
+    assert!(output.status.success(), "{}", stderr(&output));
+    let masked = stdout(&output);
+    assert!(!masked.contains(pem));
+    assert!(!masked.contains(email));
+    let private_ref = masked.lines().next().ok_or("missing private-key SafeRef")?;
+    let pii_ref = masked
+        .lines()
+        .nth(1)
+        .and_then(|line| line.strip_prefix("OWNER="))
+        .ok_or("missing PII SafeRef")?;
+    assert_eq!(
+        SafeRef::parse(private_ref)?.kind(),
+        blindfold_core::SafeRefKind::PrivateKey
+    );
+    assert_eq!(
+        SafeRef::parse(pii_ref)?.kind(),
+        blindfold_core::SafeRefKind::PersonallyIdentifiableInformation
+    );
+    Ok(())
+}
+
+#[test]
+fn mask_requires_a_master_key_without_echoing_input() -> Result<(), Box<dyn Error>> {
+    let directory = TestDirectory::new()?;
+    let raw = "sk-proj-abcdefghijklmnopqrstuvwxyz012345";
+    let output = blindfold_with_input(directory.path(), &["mask"], raw)?;
+
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
+    assert!(stderr(&output).contains("BLINDFOLD_MASTER_KEY"));
+    assert!(!stderr(&output).contains(raw));
+    assert!(!directory.path().join(".blindfold/vault.bin").exists());
+    Ok(())
+}
+
+#[test]
+fn mask_output_refuses_overwrite_and_force_replaces_atomically() -> Result<(), Box<dyn Error>> {
+    let directory = TestDirectory::new()?;
+    let raw = "sk-proj-abcdefghijklmnopqrstuvwxyz012345";
+    fs::write(directory.path().join("input.txt"), raw)?;
+    fs::write(directory.path().join("masked.txt"), "keep-me")?;
+    let key = "33".repeat(32);
+
+    let refused = Command::new(env!("CARGO_BIN_EXE_blindfold"))
+        .args(["mask", "input.txt", "--output", "masked.txt"])
+        .env("BLINDFOLD_MASTER_KEY", &key)
+        .current_dir(directory.path())
+        .output()?;
+    assert!(!refused.status.success());
+    assert_eq!(
+        fs::read_to_string(directory.path().join("masked.txt"))?,
+        "keep-me"
+    );
+    assert!(!directory.path().join(".blindfold/vault.bin").exists());
+    assert!(!stderr(&refused).contains(raw));
+
+    let forced = Command::new(env!("CARGO_BIN_EXE_blindfold"))
+        .args(["mask", "input.txt", "--output", "masked.txt", "--force"])
+        .env("BLINDFOLD_MASTER_KEY", key)
+        .current_dir(directory.path())
+        .output()?;
+    assert!(forced.status.success(), "{}", stderr(&forced));
+    let masked = fs::read_to_string(directory.path().join("masked.txt"))?;
+    assert!(!masked.contains(raw));
+    assert!(masked.starts_with("{{BLINDFOLD:v1:SECRET:"));
     Ok(())
 }
 
@@ -1113,6 +1330,9 @@ fn destructive_and_ambiguous_cli_inputs_are_rejected() -> Result<(), Box<dyn Err
     )?;
     assert!(!invalid_ttl.status.success());
 
+    let invalid_mask_ttl = blindfold(directory.path(), &["mask", "--ttl-seconds", "nope"])?;
+    assert!(!invalid_mask_ttl.status.success());
+
     let key = "11".repeat(32);
     let clear = Command::new(env!("CARGO_BIN_EXE_blindfold"))
         .args(["vault", "clear"])
@@ -1131,35 +1351,29 @@ fn destructive_and_ambiguous_cli_inputs_are_rejected() -> Result<(), Box<dyn Err
 }
 
 #[test]
-fn strict_agent_preview_refuses_degraded_boundary() -> Result<(), Box<dyn Error>> {
+fn removed_strict_flag_is_rejected() -> Result<(), Box<dyn Error>> {
     let directory = TestDirectory::new()?;
     let output = blindfold(directory.path(), &["run", "claude", "--strict"])?;
 
     assert!(!output.status.success());
-    assert!(stderr(&output).contains("strict agent mode is unavailable"));
+    assert!(stderr(&output).contains("unexpected argument '--strict'"));
     Ok(())
 }
 
 #[test]
 fn claude_wrapper_routes_through_anthropic_proxy() -> Result<(), Box<dyn Error>> {
     let directory = TestDirectory::new()?;
-    let agent = fake_agent(directory.path())?;
+    fake_agent(directory.path(), "claude")?;
     let output = blindfold(
         directory.path(),
-        &[
-            "run",
-            "--guard",
-            "claude",
-            "--agent-command",
-            agent.to_str().ok_or("non-UTF-8 agent path")?,
-            "--",
-            "--print",
-            "hello",
-        ],
+        &["run", "claude", "--", "--print", "hello"],
     )?;
 
     assert!(output.status.success(), "{}", stderr(&output));
-    assert!(stderr(&output).contains("Blindfold Guard active"));
+    assert!(
+        stderr(&output)
+            .contains("Blindfold managed model boundary active (not whole-agent containment)")
+    );
     assert_eq!(
         fs::read_to_string(directory.path().join("agent-args"))?,
         "--print\nhello\n"
@@ -1175,19 +1389,8 @@ fn claude_wrapper_routes_through_anthropic_proxy() -> Result<(), Box<dyn Error>>
 #[test]
 fn codex_wrapper_injects_one_run_base_url_override() -> Result<(), Box<dyn Error>> {
     let directory = TestDirectory::new()?;
-    let agent = fake_agent(directory.path())?;
-    let output = blindfold(
-        directory.path(),
-        &[
-            "run",
-            "--guard",
-            "codex",
-            "--agent-command",
-            agent.to_str().ok_or("non-UTF-8 agent path")?,
-            "--",
-            "review",
-        ],
-    )?;
+    fake_agent(directory.path(), "codex")?;
+    let output = blindfold(directory.path(), &["run", "codex", "--", "review"])?;
 
     assert!(output.status.success(), "{}", stderr(&output));
     let arguments = fs::read_to_string(directory.path().join("agent-args"))?;
@@ -1197,40 +1400,37 @@ fn codex_wrapper_injects_one_run_base_url_override() -> Result<(), Box<dyn Error
 }
 
 #[test]
-fn interactive_codex_guard_refuses_uncaptured_terminal_mode() -> Result<(), Box<dyn Error>> {
+fn incompatible_harness_version_fails_before_agent_start() -> Result<(), Box<dyn Error>> {
+    for version in ["0.143.9", "0.144.2"] {
+        let directory = TestDirectory::new()?;
+        fake_incompatible_agent(directory.path(), version)?;
+        let output = blindfold(directory.path(), &["run", "codex", "--", "exec", "hello"])?;
+
+        assert!(!output.status.success());
+        assert!(stderr(&output).contains("executable version is incompatible"));
+        assert!(!directory.path().join("agent-started").exists());
+        assert!(!stderr(&output).contains(version));
+    }
+    Ok(())
+}
+
+#[test]
+fn interactive_codex_is_rejected() -> Result<(), Box<dyn Error>> {
     let directory = TestDirectory::new()?;
-    let agent = fake_agent(directory.path())?;
-    let output = blindfold(
-        directory.path(),
-        &[
-            "run",
-            "--guard",
-            "codex",
-            "--agent-command",
-            agent.to_str().ok_or("non-UTF-8 agent path")?,
-        ],
-    )?;
+    fake_agent(directory.path(), "codex")?;
+    let output = blindfold(directory.path(), &["run", "codex"])?;
 
     assert!(!output.status.success());
-    assert!(stderr(&output).contains("terminal output"));
+    assert!(stderr(&output).contains("Codex interactive mode is not supported"));
     assert!(!directory.path().join("agent-args").exists());
     Ok(())
 }
 
 #[test]
-fn interactive_opencode_guard_refuses_unproven_tui_mode() -> Result<(), Box<dyn Error>> {
+fn interactive_opencode_is_rejected() -> Result<(), Box<dyn Error>> {
     let directory = TestDirectory::new()?;
-    let agent = fake_agent(directory.path())?;
-    let output = blindfold(
-        directory.path(),
-        &[
-            "run",
-            "--guard",
-            "opencode",
-            "--agent-command",
-            agent.to_str().ok_or("non-UTF-8 agent path")?,
-        ],
-    )?;
+    fake_agent(directory.path(), "opencode")?;
+    let output = blindfold(directory.path(), &["run", "opencode"])?;
 
     assert!(!output.status.success());
     assert!(stderr(&output).contains("OpenCode interactive/TUI mode"));
@@ -1239,19 +1439,10 @@ fn interactive_opencode_guard_refuses_unproven_tui_mode() -> Result<(), Box<dyn 
 }
 
 #[test]
-fn interactive_claude_guard_refuses_unproven_mode() -> Result<(), Box<dyn Error>> {
+fn interactive_claude_is_rejected() -> Result<(), Box<dyn Error>> {
     let directory = TestDirectory::new()?;
-    let agent = fake_agent(directory.path())?;
-    let output = blindfold(
-        directory.path(),
-        &[
-            "run",
-            "--guard",
-            "claude",
-            "--agent-command",
-            agent.to_str().ok_or("non-UTF-8 agent path")?,
-        ],
-    )?;
+    fake_agent(directory.path(), "claude")?;
+    let output = blindfold(directory.path(), &["run", "claude"])?;
 
     assert!(!output.status.success());
     assert!(stderr(&output).contains("Claude interactive mode"));
@@ -1260,7 +1451,7 @@ fn interactive_claude_guard_refuses_unproven_mode() -> Result<(), Box<dyn Error>
 }
 
 #[test]
-fn guard_refuses_unproven_or_dangerous_agent_arguments() -> Result<(), Box<dyn Error>> {
+fn runner_refuses_unsupported_or_dangerous_agent_arguments() -> Result<(), Box<dyn Error>> {
     for (agent_name, args, expected) in [
         (
             "claude",
@@ -1295,18 +1486,10 @@ fn guard_refuses_unproven_or_dangerous_agent_arguments() -> Result<(), Box<dyn E
         ("opencode", &["serve"], "dangerous mode"),
     ] {
         let directory = TestDirectory::new()?;
-        let agent = fake_agent(directory.path())?;
-        let output = Command::new(env!("CARGO_BIN_EXE_blindfold"))
-            .args([
-                "run",
-                "--guard",
-                agent_name,
-                "--agent-command",
-                agent.to_str().ok_or("non-UTF-8 agent path")?,
-                "--",
-            ])
+        fake_agent(directory.path(), agent_name)?;
+        let output = blindfold_command(directory.path())
+            .args(["run", agent_name, "--"])
             .args(args)
-            .current_dir(directory.path())
             .output()?;
 
         assert!(
@@ -1327,23 +1510,13 @@ fn guard_refuses_unproven_or_dangerous_agent_arguments() -> Result<(), Box<dyn E
 #[test]
 fn opencode_wrapper_merges_inline_config_and_routes_both_providers() -> Result<(), Box<dyn Error>> {
     let directory = TestDirectory::new()?;
-    let agent = fake_agent(directory.path())?;
-    let output = Command::new(env!("CARGO_BIN_EXE_blindfold"))
-        .args([
-            "run",
-            "--guard",
-            "opencode",
-            "--agent-command",
-            agent.to_str().ok_or("non-UTF-8 agent path")?,
-            "--",
-            "run",
-            "hello",
-        ])
+    fake_agent(directory.path(), "opencode")?;
+    let output = blindfold_command(directory.path())
+        .args(["run", "opencode", "--", "run", "hello"])
         .env(
             "OPENCODE_CONFIG_CONTENT",
             r#"{"theme":"system","provider":{"openai":{"options":{"timeout":1000}}}}"#,
         )
-        .current_dir(directory.path())
         .output()?;
 
     assert!(output.status.success(), "{}", stderr(&output));
@@ -1373,19 +1546,9 @@ fn opencode_wrapper_merges_inline_config_and_routes_both_providers() -> Result<(
 #[test]
 fn managed_noninteractive_agent_output_is_sanitized() -> Result<(), Box<dyn Error>> {
     let directory = TestDirectory::new()?;
-    let agent = fake_leaky_agent(directory.path())?;
-    let output = Command::new(env!("CARGO_BIN_EXE_blindfold"))
-        .args([
-            "run",
-            "--guard",
-            "codex",
-            "--agent-command",
-            agent.to_str().ok_or("non-UTF-8 agent path")?,
-            "--",
-            "exec",
-            "hello",
-        ])
-        .current_dir(directory.path())
+    fake_leaky_agent(directory.path())?;
+    let output = blindfold_command(directory.path())
+        .args(["run", "codex", "--", "exec", "hello"])
         .output()?;
 
     assert_eq!(output.status.code(), Some(7));
@@ -1393,11 +1556,21 @@ fn managed_noninteractive_agent_output_is_sanitized() -> Result<(), Box<dyn Erro
     assert!(!stderr(&output).contains(PROVIDER_FIXTURE));
     assert!(stdout(&output).contains("[REDACTED:openai_api_key]"));
     assert!(stderr(&output).contains("[REDACTED:openai_api_key]"));
+    assert_eq!(
+        stdout(&output).matches("[REDACTED:openai_api_key]").count(),
+        1,
+        "sanitized stdout must be emitted exactly once"
+    );
+    assert_eq!(
+        stderr(&output).matches("[REDACTED:openai_api_key]").count(),
+        1,
+        "sanitized stderr must be emitted exactly once"
+    );
     Ok(())
 }
 
 #[test]
-fn guarded_agent_modes_redact_requests_and_responses_to_fake_providers()
+fn managed_agent_modes_redact_requests_and_responses_to_fake_providers()
 -> Result<(), Box<dyn Error>> {
     for case in [
         AgentProviderCase {
@@ -1455,30 +1628,25 @@ fn guarded_agent_modes_redact_requests_and_responses_to_fake_providers()
             route_fragment: "/v1/chat/completions",
         },
     ] {
-        run_guarded_fake_provider_case(&case)?;
+        run_managed_fake_provider_case(&case)?;
     }
     Ok(())
 }
 
-fn run_guarded_fake_provider_case(case: &AgentProviderCase) -> Result<(), Box<dyn Error>> {
+fn run_managed_fake_provider_case(case: &AgentProviderCase) -> Result<(), Box<dyn Error>> {
     let directory = TestDirectory::new()?;
     let provider = spawn_fake_provider(case.response_mode)?;
-    let agent = fake_provider_agent(directory.path(), case.agent_mode)?;
-    let agent_path = agent.to_str().ok_or("non-UTF-8 agent path")?;
-    let output = Command::new(env!("CARGO_BIN_EXE_blindfold"))
+    fake_provider_agent(directory.path(), case.agent_mode)?;
+    let output = blindfold_command(directory.path())
         .args([
             "run",
-            "--guard",
             "--trace",
             case.agent,
             case.upstream_flag,
             &provider.upstream,
-            "--agent-command",
-            agent_path,
             "--",
         ])
         .args(case.agent_args)
-        .current_dir(directory.path())
         .output()?;
 
     assert!(
@@ -1504,12 +1672,12 @@ fn run_guarded_fake_provider_case(case: &AgentProviderCase) -> Result<(), Box<dy
         .done
         .join()
         .map_err(|_| "provider thread panicked")?;
-    assert_guarded_provider_request(case, &request);
-    assert_guarded_provider_outputs(case, directory.path(), &output)?;
+    assert_managed_provider_request(case, &request);
+    assert_managed_provider_outputs(case, directory.path(), &output)?;
     Ok(())
 }
 
-fn assert_guarded_provider_request(case: &AgentProviderCase, request: &CapturedProviderRequest) {
+fn assert_managed_provider_request(case: &AgentProviderCase, request: &CapturedProviderRequest) {
     assert!(
         request.request_line.contains(case.route_fragment),
         "{}: unexpected upstream request line {}",
@@ -1536,7 +1704,7 @@ fn assert_guarded_provider_request(case: &AgentProviderCase, request: &CapturedP
     );
 }
 
-fn assert_guarded_provider_outputs(
+fn assert_managed_provider_outputs(
     case: &AgentProviderCase,
     directory: &Path,
     output: &Output,
@@ -1585,48 +1753,63 @@ fn assert_guarded_provider_outputs(
 }
 
 #[test]
-fn wrapper_bypass_does_not_inject_proxy_configuration() -> Result<(), Box<dyn Error>> {
+fn removed_no_proxy_flag_is_rejected() -> Result<(), Box<dyn Error>> {
     let directory = TestDirectory::new()?;
-    let agent = fake_agent(directory.path())?;
+    fake_agent(directory.path(), "codex")?;
     let output = blindfold(
         directory.path(),
-        &[
-            "run",
-            "codex",
-            "--no-proxy",
-            "--agent-command",
-            agent.to_str().ok_or("non-UTF-8 agent path")?,
-            "--",
-            "--version",
-        ],
+        &["run", "codex", "--no-proxy", "--", "--version"],
     )?;
 
+    assert!(!output.status.success());
+    assert!(stderr(&output).contains("unexpected argument '--no-proxy'"));
+    assert!(!directory.path().join("agent-args").exists());
+    Ok(())
+}
+
+#[test]
+fn removed_guard_flag_is_rejected() -> Result<(), Box<dyn Error>> {
+    let directory = TestDirectory::new()?;
+    let output = blindfold(
+        directory.path(),
+        &["run", "--guard", "codex", "--", "exec", "hello"],
+    )?;
+
+    assert!(!output.status.success());
+    assert!(stderr(&output).contains("unexpected argument '--guard'"));
+    Ok(())
+}
+
+#[test]
+fn bypass_environment_variable_does_not_disable_boundary() -> Result<(), Box<dyn Error>> {
+    let directory = TestDirectory::new()?;
+    fake_agent(directory.path(), "codex")?;
+    let output = blindfold_command(directory.path())
+        .args(["run", "codex", "--", "exec", "hello"])
+        .env("BLINDFOLD_BYPASS", "1")
+        .output()?;
+
     assert!(output.status.success(), "{}", stderr(&output));
-    assert_eq!(
-        fs::read_to_string(directory.path().join("agent-args"))?,
-        "--version\n"
+    assert!(
+        stderr(&output)
+            .contains("Blindfold managed model boundary active (not whole-agent containment)")
     );
-    assert!(stderr(&output).contains("bypass requested"));
+    assert!(
+        fs::read_to_string(directory.path().join("https-proxy"))?.starts_with("http://127.0.0.1:")
+    );
+    let arguments = fs::read_to_string(directory.path().join("agent-args"))?;
+    assert!(arguments.contains("openai_base_url=\"http://127.0.0.1:"));
     Ok(())
 }
 
 #[test]
 fn managed_wrapper_does_not_inherit_parent_secrets() -> Result<(), Box<dyn Error>> {
     let directory = TestDirectory::new()?;
-    let agent = fake_agent(directory.path())?;
-    let output = Command::new(env!("CARGO_BIN_EXE_blindfold"))
-        .args([
-            "run",
-            "codex",
-            "--agent-command",
-            agent.to_str().ok_or("non-UTF-8 agent path")?,
-            "--",
-            "exec",
-            "--version",
-        ])
+    fake_agent(directory.path(), "codex")?;
+    let output = blindfold_command(directory.path())
+        .args(["run", "codex", "--", "exec", "--version"])
         .env("BLINDFOLD_MASTER_KEY", "11".repeat(32))
         .env("UNRELATED_PARENT_SECRET", "fake-parent-secret")
-        .current_dir(directory.path())
         .output()?;
 
     assert!(output.status.success(), "{}", stderr(&output));
@@ -1642,15 +1825,11 @@ fn managed_wrapper_does_not_inherit_parent_secrets() -> Result<(), Box<dyn Error
 }
 
 #[test]
-fn shell_init_wraps_all_agents_and_exposes_bypass_helper() -> Result<(), Box<dyn Error>> {
+fn removed_shell_init_command_is_rejected() -> Result<(), Box<dyn Error>> {
     let directory = TestDirectory::new()?;
     let output = blindfold(directory.path(), &["shell-init", "zsh"])?;
-    let script = stdout(&output);
 
-    assert!(output.status.success());
-    assert!(script.contains("blindfold run --guard claude"));
-    assert!(script.contains("blindfold run --guard codex"));
-    assert!(script.contains("blindfold run --guard opencode"));
-    assert!(script.contains("bf-off()"));
+    assert!(!output.status.success());
+    assert!(stderr(&output).contains("unrecognized subcommand 'shell-init'"));
     Ok(())
 }

@@ -1,101 +1,65 @@
 # Changelog
 
-All notable changes to this project will be documented in this file.
-
-The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the
-project follows Semantic Versioning as described in
-[docs/release-policy.md](docs/release-policy.md).
+All notable changes to this project are documented here. The format follows
+[Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses Semantic
+Versioning.
 
 ## [Unreleased]
 
 ### Added
 
-- Explicit payload-free command/session/request tracing with global `--trace`,
-  `trace list|show|tail|export|clear`, and the short `bf` binary alias.
-- Closed, bounded, rotating, schema-validated owner-only trace storage.
-- Cryptographically randomized operation-local Rust surrogates.
-- Complete scan reporting with a distinct incomplete-scan exit code.
-- Atomic redacted file output with overwrite protection.
-- A task-oriented `USE_CASES.md` beginner guide with copy-paste workflows.
-- Zero-persistence wrappers for Claude Code, Codex CLI, and OpenCode.
-- Explicit guard-mode spelling with `blindfold run --guard ...`.
-- Guard mode starts a CONNECT egress guard and sets proxy environment variables for the
-  agent process, blocking direct known LLM provider tunnels for proxy-aware clients.
-- Project-scoped egress commands: `blindfold allow domain ...`, `blindfold deny domain ...`,
-  and `blindfold status`.
-- Guard egress now allows common development registries by default and blocks unknown
-  domains unless the project policy allows them.
-- Guard egress decisions now emit payload-free trace records with no destination host,
-  headers, query strings, or request bodies.
-- OpenRouter routing for OpenCode through Blindfold's OpenAI-compatible proxy path.
-- ADR 0005 documenting fail-closed proxy compatibility gates for supported agent modes.
-- ADR 0006 and Phase P4C documenting the explicit MITM/deep-inspection spike and proxy
-  crate evaluation.
-- `blindfold shell-init` and visible per-invocation wrapper opt-out support.
-- Fake-upstream compatibility regression coverage for guarded Claude, Codex `exec`,
-  and OpenCode `run` requests and responses.
-- Agent/provider compatibility matrix documenting proven, pending, and fail-closed
-  guarded wrapper modes.
-- Captured stdout/stderr redaction for non-interactive guarded `codex exec`,
-  `codex review`, and `opencode run` child processes.
-- Fake-upstream and trace-safety coverage for guarded `codex review`, OpenCode
-  Anthropic, and OpenCode OpenRouter routes.
-- Guard argument validation for unproven or dangerous Claude, Codex, and OpenCode
-  modes before the child process launches.
-- `doctor` compatibility checks for installed Claude, Codex, and OpenCode commands.
-- CI execution of the manual guard smoke script against fake local providers.
-- Secret detectors, redaction modes, bounded repository scanning, and safe reports.
-- Destination-aware policy presets and scoped restoration decisions.
-- XChaCha20-Poly1305 local vault with safe audit metadata.
-- Sanitized explicit-secret process execution.
-- Minimal `blindfold call` broker for one project-policy-gated bearer-token HTTP
-  request with bounded non-secret body input, redacted response output, trace preflight,
-  and detailed payload-free tracing.
-- Loopback OpenAI-compatible and Anthropic-compatible application proxy.
-- Bounded, bidirectional WebSocket frame sanitization for Codex responses transport,
-  with payload-free byte and replacement trace metadata.
-- Fail-closed LLM proxy checks for sensitive URL paths, query parameters, and
-  non-provider-authentication headers before upstream forwarding.
-- Unified-diff secret scanning.
-- MCP stdio JSON-RPC protection preview.
-- Dependency-free TypeScript application SDK preview.
-- Integrated CLI commands and user-focused README examples.
-- Apache License 2.0.
-- CI checks for formatting, Clippy, tests, dependency policy, vulnerability auditing,
-  and secret scanning.
-- Architecture decisions for the Rust baseline, vault direction, SafeRef format, and
-  managed support boundary.
-- Isolated fake credential fixtures for future security regression tests.
+- Secret and supported-PII detectors, bounded repository scanning, and complete-scan
+  reporting.
+- Placeholder, environment-reference, schema-only, surrogate, blocking, and encrypted
+  vault-backed masking operations.
+- XChaCha20-Poly1305 local vault with scoped, expiring opaque SafeRefs and safe audit
+  metadata.
+- Sanitized explicit-secret process execution and a narrow policy-gated bearer HTTP
+  broker.
+- Loopback OpenAI/Anthropic proxy with bounded JSON, Anthropic response SSE, and OpenAI
+  Responses WebSocket handling.
+- One constrained runner for Claude print mode, Codex exec/review, and OpenCode run.
+- Mandatory proxy-aware egress policy and captured output sanitization for supported
+  agent commands.
+- Destination policy, generated-diff scanning, MCP stdio transformation, and closed
+  payload-free command/session/request tracing.
+- Dependency-free Python and TypeScript application SDK previews.
+- Rust workspace CI, dependency policy, vulnerability audit, and secret fixture checks.
+- ADR 0008 documenting the constrained noninteractive runner.
+- Strict, bounded TOML harness-adapter manifests using `serde`, `toml`, and `semver`,
+  plus an explicit-directory plugin host with contained-entrypoint validation.
+- Embedded Claude, Codex, and OpenCode adapter manifests with fail-closed exact-version
+  probes at `bf run` startup; `bf doctor` validates manifests without executing agents.
+
+### Changed
+
+- JSON sanitization now visits every string value instead of a provider-field allowlist.
+- HTTP provider forwarding is POST-only; unsupported content types fail closed even for
+  empty bodies.
+- Anthropic SSE is response-only and route-gated; OpenAI SSE is rejected.
+- WebSockets are limited to JSON-object text messages on the OpenAI Responses route.
+- Agent execution no longer exposes selectable guard/degraded modes. The managed proxy,
+  proxy-aware egress control, clean environment, and captured output are mandatory.
+- Interactive/TUI, resume, server, remote, plugin, search, and dangerous permission
+  bypass modes fail before the child starts.
+- Removed `--guard`, `--no-proxy`, preview `--strict`, `BLINDFOLD_BYPASS`, and generated
+  shell wrappers.
+- Untested older and future harness versions now fail before proxy or agent startup.
+- Unix managed execution now terminates remaining child process-group members so a
+  pipe-holding descendant cannot defeat an output or version-probe timeout.
 
 ### Fixed
 
-- Interactive Codex guard runs now fail closed with an explicit WebSocket transport
-  limitation instead of launching an unsupported proxy path.
-- OpenAI and OpenRouter upstream defaults now use route roots, avoiding duplicate
-  `/v1/v1` provider paths when the local proxy forwards agent requests.
-- Non-interactive guarded wrapper output now preserves the child exit code while
-  redacting detected secrets from captured stdout/stderr.
-- OpenCode interactive/TUI guard mode now fails closed until that transport is proven
-  safe; documented examples use `opencode run ...`.
-- Claude interactive guard mode now fails closed; guarded Claude requires explicit
-  `--print`/`-p`.
-- Unsupported upgrade transports fail closed before forwarding; allowlisted provider
-  WebSocket text frames are now sanitized in both directions.
-- Traced agent sessions now explicitly report unmediated direct filesystem access
-  instead of implying the whole session is protected.
-- Managed coding-agent wrappers no longer inherit the parent secret environment.
-- Audit reads reject symlinks, oversized files, malformed records, and free-form fields.
-- MCP stdio reads are bounded per message and plaintext credential-named tool arguments
-  fail closed.
-- Proxy sanitization now covers nested tool payloads and rejects unsupported non-empty
-  media types.
+- Managed child output is emitted once after sanitization rather than duplicated.
+- Parent secret environment variables are no longer inherited by managed agents.
+- Unknown JSON fields, fragmented SSE events, fragmented WebSocket messages, unsupported
+  upgrade paths, binary frames, and upstream response headers cannot bypass the proxy
+  boundary.
+- Agent traces explicitly report unmediated filesystem reads instead of implying
+  whole-agent containment.
+- Vault, audit, trace, and policy storage reject unsafe symlinked paths and malformed or
+  free-form records.
 - Diff scanning no longer treats a whole line as safe because it contains a SafeRef or
-  a placeholder-like substring.
-- Vault and audit paths reject symlinked storage targets.
-- TypeScript SDK tokens are unpredictable and overlapping values are replaced
-  longest-first.
-- Contextual detector matches no longer redact only a prefix of punctuation-rich or
-  oversized values.
-- CLI proxy startup now satisfies the detector's required streaming overlap.
+  placeholder-like substring.
 
 [Unreleased]: https://github.com/Nauman3S/blindfold/compare/HEAD

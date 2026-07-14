@@ -1,0 +1,18 @@
+[package]
+name = "blindfold-plugin-host"
+description = "Fail-closed installed-plugin discovery and executable compatibility probes"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+readme = "README.md"
+
+[dependencies]
+blindfold-exec = { path = "../blindfold-exec" }
+blindfold-plugin-api = { path = "../blindfold-plugin-api" }
+semver = "1.0.28"
+tempfile = "3.23.0"
+
+[lints]
+workspace = true

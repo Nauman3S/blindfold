@@ -1,11 +1,11 @@
 # ADR 0005: Proxy Fail-Closed Compatibility Gates
 
-- Status: Accepted
+- Status: Accepted principle; transport grammar updated by ADR 0008
 - Date: 2026-06-17
 
 ## Context
 
-Blindfold's guard mode depends on agent traffic being routed through an application
+Blindfold's managed runner depends on agent traffic being routed through an application
 proxy that can inspect and sanitize provider payloads. Coding agents may use different
 provider transports by mode or version, including JSON over HTTP, Server-Sent Events,
 WebSockets, local plugins, or direct provider clients.
@@ -16,12 +16,14 @@ variables being set.
 
 ## Decision
 
-Guarded provider traffic must fail closed:
+Managed provider traffic must fail closed:
 
-- inspectable HTTP JSON and SSE requests may be forwarded only after sanitization;
-- allowlisted provider WebSocket text frames may be forwarded only after bounded
-  bidirectional sanitization; other upgrades and binary/raw frames fail closed;
-- unsupported content types are rejected unless the body is empty;
+- JSON POST bodies may be forwarded only after recursive sanitization;
+- bounded Anthropic response SSE is accepted only on `messages`; SSE requests and
+  OpenAI SSE fail closed;
+- OpenAI Responses WebSockets accept only JSON-object text messages on the allowlisted
+  route; other upgrades, opaque text, nonempty control, and binary frames fail closed;
+- unsupported content types are rejected even when the body is empty;
 - direct known-provider egress is blocked for proxy-aware clients; and
 - error bodies, traces, and logs must not include raw payloads, headers, query strings,
   or detected values.
@@ -34,15 +36,15 @@ A coding-agent mode is supported only when an automated fake-upstream test prove
 - unsupported transports fail closed; and
 - trace records remain payload-free.
 
-Modes without this proof must be documented as preview, degraded, or unsupported.
+Modes without this proof are unsupported and must fail before the child starts.
 
 ## Consequences
 
 Some agent modes may be refused even if they appear configurable. This is preferable to
-claiming protection for a path Blindfold cannot inspect. Codex 0.141 responses
-WebSockets are supported as of 2026-06-19, but interactive Codex remains blocked because
-its terminal stream is not captured and sanitized.
+claiming protection for a path Blindfold cannot inspect. The supported runner grammar is
+Claude print, Codex exec/review, and OpenCode run. Interactive/TUI modes are outside the
+runner.
 
 Provider authentication credentials may still be sent to their intended provider as
-part of the authenticated provider request. Blindfold's guard promise is that project
+part of the authenticated provider request. Blindfold's managed-path promise is that project
 secrets and detected sensitive payload values are not forwarded on managed paths.

@@ -58,7 +58,14 @@ RUBY
 make_agent() {
   local case_dir="$1"
   local mode="$2"
-  cat >"$case_dir/agent" <<RUBY
+  local version
+  case "$mode" in
+    claude) version="2.1.152 (Claude Code)" ;;
+    codex) version="codex-cli 0.144.1" ;;
+    opencode) version="1.17.3" ;;
+    *) echo "unknown fake mode: $mode" >&2; return 1 ;;
+  esac
+  cat >"$case_dir/agent.rb" <<RUBY
 #!/usr/bin/env ruby
 require "json"
 require "net/http"
@@ -91,7 +98,12 @@ response = Net::HTTP.start(uri.host, uri.port, nil, nil) { |http| http.request(r
 File.write("agent-response", response.body)
 puts response.body
 RUBY
-  chmod +x "$case_dir/agent"
+  cat >"$case_dir/$mode" <<SH
+#!/bin/sh
+if [ "\${1-}" = "--version" ]; then printf '%s\n' '$version'; exit 0; fi
+exec /usr/bin/ruby "$case_dir/agent.rb" "\$@"
+SH
+  chmod +x "$case_dir/$mode"
 }
 
 wait_for_url() {
@@ -145,7 +157,7 @@ run_case() {
   set +e
   (
     cd "$case_dir"
-    "$BIN" run --guard --trace "$agent" "$upstream_flag" "$upstream" --agent-command "$case_dir/agent" -- "$@"
+    PATH="$case_dir:$PATH" "$BIN" run --trace "$agent" "$upstream_flag" "$upstream" -- "$@"
   ) >"$case_dir/stdout" 2>"$case_dir/stderr"
   local status=$?
   if [[ "$status" -ne 0 ]]; then
@@ -181,15 +193,15 @@ fail_closed_case() {
   shift 2
   local case_dir="$tmp/$name"
   mkdir -p "$case_dir"
-  cat >"$case_dir/agent" <<'SH'
+  cat >"$case_dir/$agent" <<'SH'
 #!/bin/sh
 printf launched > agent-launched
 SH
-  chmod +x "$case_dir/agent"
+  chmod +x "$case_dir/$agent"
   set +e
   (
     cd "$case_dir"
-    "$BIN" run --guard "$agent" --agent-command "$case_dir/agent" -- "$@"
+    PATH="$case_dir:$PATH" "$BIN" run "$agent" -- "$@"
   ) >"$case_dir/stdout" 2>"$case_dir/stderr"
   local status=$?
   set -e
@@ -200,7 +212,7 @@ SH
   echo "PASS $name"
 }
 
-echo "Manual guard fixture smoke using $BIN (fake agent clients and fake providers)"
+echo "Managed boundary fixture smoke using $BIN (fake agent clients and fake providers)"
 for cmd in claude codex opencode; do
   if command -v "$cmd" >/dev/null 2>&1; then
     echo "FOUND $cmd: $(command -v "$cmd")"
@@ -219,4 +231,4 @@ fail_closed_case codex-interactive codex
 fail_closed_case opencode-tui opencode
 fail_closed_case claude-interactive claude
 
-echo "Manual guard smoke passed"
+echo "Managed boundary smoke passed"

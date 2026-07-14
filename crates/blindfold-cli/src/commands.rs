@@ -26,6 +26,7 @@ use blindfold_mcp::{
     Direction as McpDirection, Resolver as McpResolver, Sanitizer as McpSanitizer,
     Transformer as McpTransformer,
 };
+use blindfold_plugin_api::NonInteractiveMode;
 use blindfold_policy::{Operation, Policy, Preset, Request, SourceContext};
 use blindfold_proxy::{
     Config as ProxyConfig, Provider, Proxy, Sanitizer as ProxySanitizer, Upstream,
@@ -44,10 +45,12 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio_util::sync::CancellationToken;
 
-use crate::{config, doctor};
+use crate::{
+    agent_adapter::{HarnessAdapter, HarnessKind},
+    config, doctor,
+};
 
 const MASTER_KEY_ENV: &str = "BLINDFOLD_MASTER_KEY";
-const BYPASS_ENV: &str = "BLINDFOLD_BYPASS";
 const MANAGED_AGENT_OUTPUT_LIMIT: usize = 4 * 1024 * 1024;
 const MANAGED_AGENT_OUTPUT_TRUNCATION_OVERLAP: usize = 512;
 const CALL_REQUEST_LIMIT: usize = 64 * 1024;
@@ -86,6 +89,7 @@ pub(crate) async fn run() -> ExitCode {
         }),
         Some(("scan", args)) => scan_command(&root, args, trace_enabled),
         Some(("redact", args)) => redact_command(&root, args, trace_enabled),
+        Some(("mask", args)) => mask_command(&root, args, trace_enabled),
         Some(("exec", args)) => traced_command(&root, trace_enabled, TraceRoute::Exec, || {
             exec_command(args)
         }),
@@ -121,11 +125,6 @@ pub(crate) async fn run() -> ExitCode {
             traced_command(&root, trace_enabled, TraceRoute::Mcp, || mcp_command(args))
         }
         Some(("run", args)) => run_agent_command(&root, args, trace_enabled).await,
-        Some(("shell-init", args)) => {
-            traced_command(&root, trace_enabled, TraceRoute::ShellInit, || {
-                shell_init_command(args)
-            })
-        }
         _ => ExitCode::FAILURE,
     }
 }
@@ -181,6 +180,31 @@ fn cli() -> Command {
                             "surrogate",
                             "block",
                         ]),
+                ),
+        )
+        .subcommand(
+            Command::new("mask")
+                .about("Replace detected values with encrypted-vault SafeRefs")
+                .arg(Arg::new("file").value_name("FILE"))
+                .arg(
+                    Arg::new("output")
+                        .long("output")
+                        .short('o')
+                        .value_name("FILE")
+                        .help("Write masked content to a new file instead of stdout"),
+                )
+                .arg(
+                    Arg::new("force")
+                        .long("force")
+                        .help("Allow --output to replace an existing file")
+                        .requires("output")
+                        .action(ArgAction::SetTrue),
+                )
+                .arg(
+                    Arg::new("ttl")
+                        .long("ttl-seconds")
+                        .default_value("3600")
+                        .value_parser(clap::value_parser!(u64).range(1..)),
                 ),
         )
         .subcommand(
@@ -383,38 +407,10 @@ fn cli() -> Command {
                         .required(true)
                         .value_parser(["claude", "codex", "opencode"]),
                 )
-                .arg(
-                    Arg::new("guard")
-                        .long("guard")
-                        .help("Run in guard mode: route managed provider traffic through Blindfold")
-                        .action(ArgAction::SetTrue),
-                )
-                .arg(Arg::new("strict").long("strict").action(ArgAction::SetTrue))
                 .arg(Arg::new("anthropic").long("anthropic-upstream"))
                 .arg(Arg::new("openai").long("openai-upstream"))
                 .arg(Arg::new("openrouter").long("openrouter-upstream"))
-                .arg(
-                    Arg::new("no_proxy")
-                        .long("no-proxy")
-                        .help("Run the native agent directly for this invocation")
-                        .action(ArgAction::SetTrue),
-                )
-                .arg(
-                    Arg::new("agent_command")
-                        .long("agent-command")
-                        .help("Override the native agent executable")
-                        .value_name("PATH"),
-                )
                 .arg(Arg::new("agent_arg").num_args(0..).trailing_var_arg(true)),
-        )
-        .subcommand(
-            Command::new("shell-init")
-                .about("Print opt-out-friendly shell wrappers for coding agents")
-                .arg(
-                    Arg::new("shell")
-                        .default_value("zsh")
-                        .value_parser(["bash", "zsh"]),
-                ),
         )
 }
 
@@ -570,17 +566,9 @@ fn print_scan_json(report: &blindfold_detectors::ScanReport) {
 }
 
 fn redact_command(root: &Path, args: &ArgMatches, trace_enabled: bool) -> ExitCode {
-    let input = if let Some(path) = args.get_one::<String>("file") {
-        match fs::read_to_string(path) {
-            Ok(input) => input,
-            Err(error) => return fail(&format!("could not read input: {}", error.kind())),
-        }
-    } else {
-        let mut input = String::new();
-        if let Err(error) = io::stdin().read_to_string(&mut input) {
-            return fail(&format!("could not read standard input: {}", error.kind()));
-        }
-        input
+    let input = match read_text_input(args) {
+        Ok(input) => input,
+        Err(code) => return code,
     };
     let mode = match args.get_one::<String>("mode").map(String::as_str) {
         Some("env-ref") => RedactionMode::EnvRef,
@@ -601,8 +589,13 @@ fn redact_command(root: &Path, args: &ArgMatches, trace_enabled: bool) -> ExitCo
     match redactor.redact(&input, options) {
         Ok(output) => {
             if trace_enabled
-                && let Err(error) =
-                    append_redact_trace(root, &input, output.text(), output.findings())
+                && let Err(error) = append_transform_trace(
+                    root,
+                    TraceRoute::Redact,
+                    &input,
+                    output.text(),
+                    output.findings(),
+                )
             {
                 return fail(&error.to_string());
             }
@@ -617,8 +610,180 @@ fn redact_command(root: &Path, args: &ArgMatches, trace_enabled: bool) -> ExitCo
     }
 }
 
-fn append_redact_trace(
+fn read_text_input(args: &ArgMatches) -> Result<String, ExitCode> {
+    if let Some(path) = args.get_one::<String>("file") {
+        fs::read_to_string(path)
+            .map_err(|error| fail(&format!("could not read input: {}", error.kind())))
+    } else {
+        let mut input = String::new();
+        io::stdin()
+            .read_to_string(&mut input)
+            .map_err(|error| fail(&format!("could not read standard input: {}", error.kind())))?;
+        Ok(input)
+    }
+}
+
+fn mask_command(root: &Path, args: &ArgMatches, trace_enabled: bool) -> ExitCode {
+    if let Some(path) = args.get_one::<String>("output")
+        && !args.get_flag("force")
+    {
+        match Path::new(path).symlink_metadata() {
+            Ok(_) => {
+                return fail("output file already exists; choose another path or pass --force");
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return fail(&format!("could not inspect output file: {}", error.kind()));
+            }
+        }
+    }
+    let input = match read_text_input(args) {
+        Ok(input) => input,
+        Err(code) => return code,
+    };
+    let detector_set = match detectors() {
+        Ok(detectors) => detectors,
+        Err(code) => return code,
+    };
+    let findings = detector_set.detect(&input);
+    if let Err(code) = validate_finding_spans(&input, &findings) {
+        return code;
+    }
+    let vault = match open_vault(root) {
+        Ok(vault) => vault,
+        Err(code) => return code,
+    };
+    let scope = match project_scope(root) {
+        Ok(scope) => scope,
+        Err(error) => return fail(&error.to_string()),
+    };
+    let ttl = Duration::from_secs(args.get_one::<u64>("ttl").copied().unwrap_or(3600));
+    let (output, stored_refs) = match mask_findings(&input, &findings, &vault, &scope, ttl) {
+        Ok(output) => output,
+        Err(code) => return code,
+    };
+    if let Err(error) = append_store_audit(root, &stored_refs) {
+        return fail(&error.to_string());
+    }
+    if trace_enabled
+        && let Err(error) =
+            append_transform_trace(root, TraceRoute::Mask, &input, &output, &findings)
+    {
+        return fail(&error.to_string());
+    }
+    if let Some(path) = args.get_one::<String>("output") {
+        write_transformed_output(Path::new(path), &output, args.get_flag("force"), "masked")
+    } else {
+        let mut stdout = io::stdout().lock();
+        match stdout
+            .write_all(output.as_bytes())
+            .and_then(|()| stdout.flush())
+        {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(error) => fail(&format!("could not write masked output: {}", error.kind())),
+        }
+    }
+}
+
+fn validate_finding_spans(
+    input: &str,
+    findings: &[blindfold_detectors::Finding],
+) -> Result<(), ExitCode> {
+    let mut cursor = 0;
+    for finding in findings {
+        let span = finding.span();
+        if span.start() < cursor
+            || input.get(cursor..span.start()).is_none()
+            || input.get(span.as_range()).is_none()
+        {
+            return Err(fail("detector returned an invalid input span"));
+        }
+        cursor = span.end();
+    }
+    if input.get(cursor..).is_none() {
+        return Err(fail("detector returned an invalid input span"));
+    }
+    Ok(())
+}
+
+fn mask_findings(
+    input: &str,
+    findings: &[blindfold_detectors::Finding],
+    vault: &Vault,
+    scope: &Scope,
+    ttl: Duration,
+) -> Result<(String, Vec<SafeRef>), ExitCode> {
+    let mut references = Vec::<(SafeRefKind, &str, SafeRef)>::new();
+    let mut output = String::with_capacity(input.len());
+    let mut cursor = 0;
+    for finding in findings {
+        let span = finding.span();
+        let Some(prefix) = input.get(cursor..span.start()) else {
+            return Err(fail("detector returned an invalid input span"));
+        };
+        let Some(raw) = input.get(span.as_range()) else {
+            return Err(fail("detector returned an invalid input span"));
+        };
+        let kind = mask_safe_ref_kind(finding.kind());
+        let safe_ref = if let Some((_, _, safe_ref)) = references
+            .iter()
+            .find(|(stored_kind, stored_raw, _)| *stored_kind == kind && *stored_raw == raw)
+        {
+            safe_ref.clone()
+        } else {
+            let safe_ref = vault
+                .store(kind, scope, &SecretValue::new(raw), ttl)
+                .map_err(|error| fail(&error.to_string()))?;
+            references.push((kind, raw, safe_ref.clone()));
+            safe_ref
+        };
+        output.push_str(prefix);
+        output.push_str(safe_ref.as_str());
+        cursor = span.end();
+    }
+    let Some(suffix) = input.get(cursor..) else {
+        return Err(fail("detector returned an invalid input span"));
+    };
+    output.push_str(suffix);
+    Ok((
+        output,
+        references
+            .into_iter()
+            .map(|(_, _, safe_ref)| safe_ref)
+            .collect(),
+    ))
+}
+
+const fn mask_safe_ref_kind(kind: blindfold_detectors::SecretKind) -> SafeRefKind {
+    match kind {
+        blindfold_detectors::SecretKind::EmailAddress
+        | blindfold_detectors::SecretKind::PhoneNumber => {
+            SafeRefKind::PersonallyIdentifiableInformation
+        }
+        blindfold_detectors::SecretKind::PemPrivateKey => SafeRefKind::PrivateKey,
+        _ => SafeRefKind::Secret,
+    }
+}
+
+fn append_store_audit(root: &Path, safe_refs: &[SafeRef]) -> blindfold_vault::VaultResult<()> {
+    if safe_refs.is_empty() {
+        return Ok(());
+    }
+    let rotation = RotationPolicy::new(1024 * 1024, 3)?;
+    let log = AuditLog::open(root.join(".blindfold/audit.jsonl"), rotation)?;
+    for safe_ref in safe_refs {
+        log.append(&AuditEvent::now(
+            AuditAction::Store,
+            AuditOutcome::Succeeded,
+            Some(safe_ref.clone()),
+        ))?;
+    }
+    Ok(())
+}
+
+fn append_transform_trace(
     root: &Path,
+    route: TraceRoute,
     input: &str,
     output: &str,
     findings: &[blindfold_detectors::Finding],
@@ -643,7 +808,7 @@ fn append_redact_trace(
         .collect::<blindfold_trace::Result<Vec<_>>>()?;
     append_command_trace(
         root,
-        TraceRoute::Redact,
+        route,
         (
             u64::try_from(input.len()).unwrap_or(u64::MAX),
             u64::try_from(output.len()).unwrap_or(u64::MAX),
@@ -718,6 +883,15 @@ fn valid_trace_env_name(name: &str) -> bool {
 }
 
 fn write_redacted_output(path: &Path, contents: &str, force: bool) -> ExitCode {
+    write_transformed_output(path, contents, force, "redacted")
+}
+
+fn write_transformed_output(
+    path: &Path,
+    contents: &str,
+    force: bool,
+    content_kind: &'static str,
+) -> ExitCode {
     if force {
         let mut file = match AtomicWriteFile::open(path) {
             Ok(file) => file,
@@ -732,7 +906,7 @@ fn write_redacted_output(path: &Path, contents: &str, force: bool) -> ExitCode {
             return fail(&format!("could not write output file: {}", error.kind()));
         }
         eprintln!(
-            "Blindfold atomically replaced {} with redacted content.",
+            "Blindfold atomically replaced {} with {content_kind} content.",
             path.to_string_lossy()
         );
         return ExitCode::SUCCESS;
@@ -754,7 +928,7 @@ fn write_redacted_output(path: &Path, contents: &str, force: bool) -> ExitCode {
         return fail(&format!("could not write output file: {}", error.kind()));
     }
     eprintln!(
-        "Blindfold wrote redacted content to {}.",
+        "Blindfold wrote {content_kind} content to {}.",
         path.to_string_lossy()
     );
     ExitCode::SUCCESS
@@ -1492,18 +1666,6 @@ fn append_degraded_run_trace(
     )
 }
 
-fn append_unprotected_run_trace(root: &Path, route: TraceRoute) -> blindfold_trace::Result<()> {
-    append_trace_record(
-        root,
-        route,
-        TraceCoverage::Unprotected,
-        TraceOutcome::Observed,
-        (0, 0),
-        Vec::new(),
-        Some(TraceIssue::DirectFilesystemUnmediated),
-    )
-}
-
 fn append_trace_record(
     root: &Path,
     route: TraceRoute,
@@ -1637,6 +1799,7 @@ const fn trace_route_label(route: TraceRoute) -> &'static str {
         TraceRoute::Anthropic => "anthropic",
         TraceRoute::Unknown => "unknown",
         TraceRoute::Redact => "redact",
+        TraceRoute::Mask => "mask",
         TraceRoute::Scan => "scan",
         TraceRoute::Exec => "exec",
         TraceRoute::Call => "call",
@@ -1652,7 +1815,6 @@ const fn trace_route_label(route: TraceRoute) -> &'static str {
         TraceRoute::RunOpencode => "run:opencode",
         TraceRoute::Init => "init",
         TraceRoute::Doctor => "doctor",
-        TraceRoute::ShellInit => "shell-init",
     }
 }
 
@@ -1731,7 +1893,6 @@ async fn proxy_command(args: &ArgMatches) -> ExitCode {
     };
     let config = ProxyConfig {
         bind_addr: listen,
-        stream_overlap: 512,
         upstreams,
         ..ProxyConfig::default()
     };
@@ -2166,63 +2327,55 @@ async fn run_agent_command(root: &Path, args: &ArgMatches, trace_enabled: bool) 
     let agent = args
         .get_one::<String>("agent")
         .map_or("claude", String::as_str);
-    let agent_command = args
-        .get_one::<String>("agent_command")
-        .map_or(agent, String::as_str);
+    let adapter = match HarnessAdapter::load(agent) {
+        Ok(adapter) => adapter,
+        Err(error) => return fail(&error.to_string()),
+    };
+    let kind = adapter.kind();
     let agent_args = args
         .get_many::<String>("agent_arg")
         .map(|values| values.cloned().collect::<Vec<_>>())
         .unwrap_or_default();
-    let bypass = args.get_flag("no_proxy") || env_flag(BYPASS_ENV);
 
-    if bypass {
-        eprintln!("Blindfold bypass requested; launching {agent} without the managed proxy.");
-        let code = run_native_agent(agent, agent_command, &agent_args).await;
-        if trace_enabled
-            && let Err(error) = append_unprotected_run_trace(root, run_trace_route(agent))
-        {
-            return fail(&error.to_string());
-        }
-        return code;
+    if let Some(message) = unsupported_agent_argument(kind, &agent_args) {
+        return fail(message);
     }
-    if args.get_flag("strict") {
+    if kind == HarnessKind::Codex && codex_overrides_proxy(&agent_args) {
+        return fail("Codex arguments override the managed OpenAI base URL; remove that override");
+    }
+    if kind == HarnessKind::Claude
+        && (!adapter.supports_mode(NonInteractiveMode::Print)
+            || claude_uses_interactive_mode(&agent_args))
+    {
         return fail(
-            "strict agent mode is unavailable because direct filesystem and network bypass prevention is not yet established",
+            "Claude interactive mode is not supported; use `blindfold run claude -- --print ...` or `blindfold run claude -- -p ...`",
         );
     }
-    let mode = if args.get_flag("guard") {
-        "Blindfold Guard active:"
-    } else {
-        "Blindfold degraded compatibility mode:"
+    if kind == HarnessKind::Codex && codex_uses_interactive_mode(&adapter, &agent_args) {
+        return fail(
+            "Codex interactive mode is not supported; use `blindfold run codex -- exec ...` or `blindfold run codex -- review ...`",
+        );
+    }
+    if kind == HarnessKind::OpenCode
+        && (!adapter.supports_mode(NonInteractiveMode::Run)
+            || opencode_uses_unproven_interactive_mode(&agent_args))
+    {
+        return fail(
+            "OpenCode interactive/TUI mode is not supported; use `blindfold run opencode -- run ...`",
+        );
+    }
+    let agent_command = match adapter.resolve_compatible_executable() {
+        Ok(command) => command,
+        Err(error) => return fail(&error.to_string()),
     };
-    let sanitize_child_output = sanitizes_managed_agent_output(agent, &agent_args);
-    eprintln!("{mode}");
+
+    eprintln!("Blindfold managed model boundary active (not whole-agent containment):");
+    eprintln!("- harness adapter: {} (version compatible)", adapter.id());
     eprintln!("- managed provider request/response proxy: available");
-    eprintln!(
-        "- child stdout/stderr sanitization: {}",
-        if sanitize_child_output {
-            "enabled for this non-interactive mode"
-        } else {
-            "unavailable for interactive passthrough"
-        }
-    );
+    eprintln!("- child stdout/stderr sanitization: enabled");
     eprintln!("- direct filesystem/network bypass prevention: unavailable");
-    eprintln!(
-        "- direct known-provider egress blocking: {}",
-        if args.get_flag("guard") {
-            "enabled for proxy-aware clients"
-        } else {
-            "unavailable without --guard"
-        }
-    );
-    eprintln!(
-        "- unknown egress domains: {}",
-        if args.get_flag("guard") {
-            "blocked unless allowed by project policy"
-        } else {
-            "unavailable without --guard"
-        }
-    );
+    eprintln!("- proxy-aware provider egress blocking: enabled");
+    eprintln!("- proxy-aware unknown egress domains: blocked unless allowed by project policy");
     eprintln!(
         "- agent file reads: unmediated; if the agent opens .env directly, it can see raw contents"
     );
@@ -2237,31 +2390,6 @@ async fn run_agent_command(root: &Path, args: &ArgMatches, trace_enabled: bool) 
             "- trace scope: command/session metadata and managed provider requests only; direct file reads are not observable"
         );
     }
-    eprintln!("- one-run opt-out: --no-proxy or {BYPASS_ENV}=1");
-
-    if let Some(message) = unsupported_guard_argument(agent, &agent_args) {
-        return fail(message);
-    }
-    if agent == "codex" && codex_overrides_proxy(&agent_args) {
-        return fail(
-            "Codex arguments override the managed OpenAI base URL; remove that override or use --no-proxy",
-        );
-    }
-    if agent == "claude" && claude_uses_interactive_mode(&agent_args) {
-        return fail(
-            "Claude interactive mode is not proven safe through Blindfold yet; use `blindfold run --guard claude -- -p ...` or `--no-proxy`",
-        );
-    }
-    if agent == "codex" && codex_uses_interactive_mode(&agent_args) {
-        return fail(
-            "interactive Codex terminal output is not captured and sanitized yet; use `blindfold run --guard codex -- exec ...`, `blindfold run --guard codex -- review`, or `--no-proxy`",
-        );
-    }
-    if agent == "opencode" && opencode_uses_unproven_interactive_mode(&agent_args) {
-        return fail(
-            "OpenCode interactive/TUI mode is not proven safe through Blindfold yet; use `blindfold run --guard opencode -- run ...` or `--no-proxy`",
-        );
-    }
 
     let listen: SocketAddr = match "127.0.0.1:0".parse() {
         Ok(address) => address,
@@ -2271,14 +2399,13 @@ async fn run_agent_command(root: &Path, args: &ArgMatches, trace_enabled: bool) 
         Ok(sanitizer) => Arc::new(sanitizer),
         Err(code) => return code,
     };
-    let upstreams = match agent_upstreams(agent, args) {
+    let upstreams = match agent_upstreams(kind, args) {
         Ok(upstreams) => upstreams,
         Err(code) => return code,
     };
     let proxy = match Proxy::new(
         ProxyConfig {
             bind_addr: listen,
-            stream_overlap: 512,
             upstreams,
             ..ProxyConfig::default()
         },
@@ -2308,63 +2435,47 @@ async fn run_agent_command(root: &Path, args: &ArgMatches, trace_enabled: bool) 
     let cancellation = CancellationToken::new();
     let proxy_cancellation = cancellation.clone();
     let proxy_task = tokio::spawn(bound.serve(proxy_cancellation));
-    let egress = if args.get_flag("guard") {
-        let policy = match EgressNetworkPolicy::load(root) {
-            Ok(policy) => policy,
-            Err(message) => {
-                cancellation.cancel();
-                let _ = proxy_task.await;
-                return fail(message);
-            }
-        };
-        match BoundEgressGuard::bind(policy, trace_sink.clone()).await {
-            Ok(guard) => Some(guard),
-            Err(error) => {
-                cancellation.cancel();
-                let _ = proxy_task.await;
-                return fail(&format!("could not start egress guard: {}", error.kind()));
-            }
+    let policy = match EgressNetworkPolicy::load(root) {
+        Ok(policy) => policy,
+        Err(message) => {
+            cancellation.cancel();
+            let _ = proxy_task.await;
+            return fail(message);
         }
-    } else {
-        None
     };
-    let egress_origin = egress
-        .as_ref()
-        .map(|guard| format!("http://{}", guard.local_addr()));
-    if let Some(origin) = &egress_origin {
-        eprintln!("- egress guard proxy: {origin}");
-    }
-    let egress_task = egress.map(|guard| {
+    let egress = match BoundEgressGuard::bind(policy, trace_sink.clone()).await {
+        Ok(guard) => guard,
+        Err(error) => {
+            cancellation.cancel();
+            let _ = proxy_task.await;
+            return fail(&format!("could not start egress guard: {}", error.kind()));
+        }
+    };
+    let egress_origin = format!("http://{}", egress.local_addr());
+    eprintln!("- egress guard proxy: {egress_origin}");
+    let egress_task = {
         let cancellation = cancellation.clone();
-        tokio::spawn(guard.serve(cancellation))
-    });
+        tokio::spawn(egress.serve(cancellation))
+    };
 
     let mut command = tokio::process::Command::new(agent_command);
     configure_managed_agent_environment(&mut command);
-    configure_agent_command(agent, &mut command, &agent_args, &proxy_origin);
-    if let Some(origin) = &egress_origin {
-        command.env("HTTP_PROXY", origin);
-        command.env("HTTPS_PROXY", origin);
-        command.env("ALL_PROXY", origin);
-        command.env("NO_PROXY", "localhost,127.0.0.1,::1");
-    }
-    let status = if sanitize_child_output {
-        run_managed_agent_with_sanitized_output(&mut command, &sanitizer).await
-    } else {
-        command.status().await
-    };
+    configure_agent_command(kind, &mut command, &agent_args, &proxy_origin);
+    command.env("HTTP_PROXY", &egress_origin);
+    command.env("HTTPS_PROXY", &egress_origin);
+    command.env("ALL_PROXY", &egress_origin);
+    command.env("NO_PROXY", "localhost,127.0.0.1,::1");
+    let status = run_managed_agent_with_sanitized_output(&mut command, &sanitizer).await;
     cancellation.cancel();
     let _ = proxy_task.await;
-    if let Some(task) = egress_task {
-        let _ = task.await;
-    }
+    let _ = egress_task.await;
     if trace_sink.is_some_and(|sink| sink.failed()) {
         return fail("one or more request traces could not be persisted safely");
     }
     if trace_enabled
         && let Err(error) = append_degraded_run_trace(
             root,
-            run_trace_route(agent),
+            run_trace_route(kind),
             TraceIssue::DirectFilesystemUnmediated,
         )
     {
@@ -2451,21 +2562,11 @@ fn write_sanitized_agent_output<W: Write>(
     Ok(())
 }
 
-fn sanitizes_managed_agent_output(agent: &str, args: &[String]) -> bool {
-    match agent {
-        "claude" => !claude_uses_interactive_mode(args),
-        "codex" => !codex_uses_interactive_mode(args),
-        "opencode" => matches!(args.first().map(String::as_str), Some("run")),
-        _ => false,
-    }
-}
-
-const fn run_trace_route(agent: &str) -> TraceRoute {
-    match agent.as_bytes() {
-        b"claude" => TraceRoute::RunClaude,
-        b"codex" => TraceRoute::RunCodex,
-        b"opencode" => TraceRoute::RunOpencode,
-        _ => TraceRoute::Unknown,
+const fn run_trace_route(kind: HarnessKind) -> TraceRoute {
+    match kind {
+        HarnessKind::Claude => TraceRoute::RunClaude,
+        HarnessKind::Codex => TraceRoute::RunCodex,
+        HarnessKind::OpenCode => TraceRoute::RunOpencode,
     }
 }
 
@@ -2493,11 +2594,11 @@ fn configure_managed_agent_environment(command: &mut tokio::process::Command) {
     }
 }
 
-fn agent_upstreams(agent: &str, args: &ArgMatches) -> Result<Vec<Upstream>, ExitCode> {
+fn agent_upstreams(kind: HarnessKind, args: &ArgMatches) -> Result<Vec<Upstream>, ExitCode> {
     let anthropic = args
         .get_one::<String>("anthropic")
         .map_or("https://api.anthropic.com", String::as_str);
-    let default_openai = if agent == "codex" {
+    let default_openai = if kind == HarnessKind::Codex {
         "https://chatgpt.com/backend-api/codex"
     } else {
         "https://api.openai.com"
@@ -2511,42 +2612,40 @@ fn agent_upstreams(agent: &str, args: &ArgMatches) -> Result<Vec<Upstream>, Exit
     let upstream = |name, url, provider| {
         Upstream::new(name, url, provider).map_err(|error| fail(&error.to_string()))
     };
-    match agent {
-        "claude" => Ok(vec![upstream("anthropic", anthropic, Provider::Anthropic)?]),
-        "codex" => Ok(vec![upstream("openai", openai, Provider::OpenAi)?]),
-        "opencode" => Ok(vec![
+    match kind {
+        HarnessKind::Claude => Ok(vec![upstream("anthropic", anthropic, Provider::Anthropic)?]),
+        HarnessKind::Codex => Ok(vec![upstream("openai", openai, Provider::OpenAi)?]),
+        HarnessKind::OpenCode => Ok(vec![
             upstream("anthropic", anthropic, Provider::Anthropic)?,
             upstream("openai", openai, Provider::OpenAi)?,
             upstream("openrouter", openrouter, Provider::OpenAi)?,
         ]),
-        _ => Err(fail("unsupported coding agent")),
     }
 }
 
 fn configure_agent_command(
-    agent: &str,
+    kind: HarnessKind,
     command: &mut tokio::process::Command,
     agent_args: &[String],
     proxy_origin: &str,
 ) {
-    match agent {
-        "claude" => {
+    match kind {
+        HarnessKind::Claude => {
             command.args(agent_args);
             command.env("ANTHROPIC_BASE_URL", format!("{proxy_origin}/anthropic"));
         }
-        "codex" => {
+        HarnessKind::Codex => {
             command.arg("-c");
             command.arg(format!("openai_base_url=\"{proxy_origin}/openai\""));
             command.args(agent_args);
         }
-        "opencode" => {
+        HarnessKind::OpenCode => {
             command.args(agent_args);
             command.env(
                 "OPENCODE_CONFIG_CONTENT",
                 opencode_proxy_config(proxy_origin),
             );
         }
-        _ => {}
     }
 }
 
@@ -2601,11 +2700,12 @@ fn codex_overrides_proxy(args: &[String]) -> bool {
         .any(|arg| arg.starts_with("--config=openai_base_url"))
 }
 
-fn codex_uses_interactive_mode(args: &[String]) -> bool {
-    !matches!(
-        args.first().map(String::as_str),
-        Some("exec" | "e" | "review")
-    )
+fn codex_uses_interactive_mode(adapter: &HarnessAdapter, args: &[String]) -> bool {
+    match args.first().map(String::as_str) {
+        Some("exec") => !adapter.supports_mode(NonInteractiveMode::Exec),
+        Some("review") => !adapter.supports_mode(NonInteractiveMode::Review),
+        _ => true,
+    }
 }
 
 fn claude_uses_interactive_mode(args: &[String]) -> bool {
@@ -2618,15 +2718,15 @@ fn opencode_uses_unproven_interactive_mode(args: &[String]) -> bool {
     !matches!(args.first().map(String::as_str), Some("run"))
 }
 
-fn unsupported_guard_argument(agent: &str, args: &[String]) -> Option<&'static str> {
+fn unsupported_agent_argument(kind: HarnessKind, args: &[String]) -> Option<&'static str> {
     let has = |flag: &str| args.iter().any(|arg| arg == flag);
     let starts = |prefix: &str| args.iter().any(|arg| arg.starts_with(prefix));
     let has_pair = |flag: &str, value: &str| {
         args.windows(2)
             .any(|pair| pair[0] == flag && pair[1] == value)
     };
-    match agent {
-        "claude"
+    match kind {
+        HarnessKind::Claude
             if has("--dangerously-skip-permissions")
                 || has("--allow-dangerously-skip-permissions")
                 || has("--remote-control")
@@ -2646,19 +2746,19 @@ fn unsupported_guard_argument(agent: &str, args: &[String]) -> Option<&'static s
                 || starts("--permission-mode=bypassPermissions") =>
         {
             Some(
-                "Claude arguments request an unproven or dangerous mode under Guard; use explicit `--print` without resume/remote/worktree/plugin/bypass options, or use --no-proxy",
+                "Claude arguments request an unsupported or dangerous mode; use explicit `--print` without resume, remote, worktree, plugin, or permission-bypass options",
             )
         }
-        "codex"
+        HarnessKind::Codex
             if has("--dangerously-bypass-approvals-and-sandbox")
                 || has("--dangerously-bypass-hook-trust")
                 || has("--search") =>
         {
             Some(
-                "Codex arguments request an unproven or dangerous mode under Guard; remove dangerous/search flags or use --no-proxy",
+                "Codex arguments request an unsupported or dangerous mode; remove dangerous or search flags",
             )
         }
-        "opencode"
+        HarnessKind::OpenCode
             if has("--interactive")
                 || has("--dangerously-skip-permissions")
                 || matches!(
@@ -2667,56 +2767,11 @@ fn unsupported_guard_argument(agent: &str, args: &[String]) -> Option<&'static s
                 ) =>
         {
             Some(
-                "OpenCode arguments request an unproven or dangerous mode under Guard; use `opencode run ...` without interactive/server/plugin options, or use --no-proxy",
+                "OpenCode arguments request an unsupported or dangerous mode; use `opencode run ...` without interactive, server, or plugin options",
             )
         }
         _ => None,
     }
-}
-
-async fn run_native_agent(agent: &str, command: &str, args: &[String]) -> ExitCode {
-    match tokio::process::Command::new(command)
-        .args(args)
-        .status()
-        .await
-    {
-        Ok(status) => exit_from_code(status.code()),
-        Err(error) => fail(&format!("could not run {agent}: {}", error.kind())),
-    }
-}
-
-fn env_flag(name: &str) -> bool {
-    env::var(name).is_ok_and(|value| {
-        matches!(
-            value.trim().to_ascii_lowercase().as_str(),
-            "1" | "true" | "yes" | "on"
-        )
-    })
-}
-
-fn shell_init_command(args: &ArgMatches) -> ExitCode {
-    let shell = args
-        .get_one::<String>("shell")
-        .map_or("zsh", String::as_str);
-    if !matches!(shell, "bash" | "zsh") {
-        return fail("unsupported shell");
-    }
-    print!(
-        r#"claude() {{
-  if [[ "${{BLINDFOLD_BYPASS:-0}}" == "1" ]]; then command claude "$@"; else command blindfold run --guard claude -- "$@"; fi
-}}
-codex() {{
-  if [[ "${{BLINDFOLD_BYPASS:-0}}" == "1" ]]; then command codex "$@"; else command blindfold run --guard codex -- "$@"; fi
-}}
-opencode() {{
-  if [[ "${{BLINDFOLD_BYPASS:-0}}" == "1" ]]; then command opencode "$@"; else command blindfold run --guard opencode -- "$@"; fi
-}}
-bf-off() {{
-  BLINDFOLD_BYPASS=1 "$@"
-}}
-"#
-    );
-    ExitCode::SUCCESS
 }
 
 struct DetectorSanitizer {
@@ -2743,10 +2798,6 @@ impl DetectorSanitizer {
 impl ProxySanitizer for DetectorSanitizer {
     fn sanitize(&self, text: &str) -> String {
         self.sanitize_text(text)
-    }
-
-    fn required_overlap(&self) -> usize {
-        512
     }
 
     fn sanitize_traced(&self, text: &str) -> ProxySanitizedText {

@@ -217,6 +217,24 @@ fn reports_timeout_termination() {
     assert!(!result.audit().exit().success());
 }
 
+#[cfg(unix)]
+#[test]
+fn terminates_pipe_holding_descendants_after_the_child_exits() -> Result<(), ExecutionError> {
+    let mut command = CommandSpec::new("/bin/sh");
+    command.args(["-c", "/bin/sleep 10 & exit 0"]);
+    let mut request = ExecutionRequest::new(command);
+    let mut limits = ExecutionLimits::new();
+    limits.set_timeout(Some(Duration::from_millis(250)));
+    request.set_limits(limits);
+
+    let started = std::time::Instant::now();
+    let result = execute(&request)?;
+
+    assert!(result.audit().exit().success());
+    assert!(started.elapsed() < Duration::from_secs(2));
+    Ok(())
+}
+
 #[test]
 fn secret_is_not_present_in_child_argv_or_safe_metadata() {
     let result = execute_child("argv", helper_environment(), true, ExecutionLimits::new());

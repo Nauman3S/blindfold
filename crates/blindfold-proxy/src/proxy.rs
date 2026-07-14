@@ -43,7 +43,7 @@ const LOOP_HEADER: HeaderName = HeaderName::from_static("x-blindfold-proxy-hop")
 const LOOP_VALUE: HeaderValue = HeaderValue::from_static("1");
 static NEXT_REQUEST_ID: AtomicU64 = AtomicU64::new(1);
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Eq, PartialEq)]
 enum BodySource {
     Request,
     Response,
@@ -89,7 +89,7 @@ impl Proxy {
     /// Returns a safe [`ConfigError`] when limits, binding policy, upstreams, or
     /// sanitizer overlap requirements are invalid.
     pub fn new(config: Config, sanitizer: Arc<dyn Sanitizer>) -> Result<Self, ConfigError> {
-        config.validate(sanitizer.required_overlap())?;
+        config.validate()?;
         let client = reqwest::Client::builder()
             .no_proxy()
             .redirect(reqwest::redirect::Policy::none())
@@ -278,6 +278,16 @@ async fn forward_websocket_inner(
         .upstreams
         .get(upstream_name)
         .ok_or_else(|| ProxyError::new(ErrorCode::UpstreamNotAllowed))?;
+    if request.headers().contains_key(&LOOP_HEADER) {
+        return Err(ProxyError::new(ErrorCode::ProxyLoop));
+    }
+    if upstream.provider != Provider::OpenAi
+        || !matches!(path.trim_matches('/'), "responses" | "v1/responses")
+        || request.method() != Method::GET
+        || request.uri().query().is_some()
+    {
+        return Err(ProxyError::new(ErrorCode::UnsupportedTransport));
+    }
     reject_sensitive_request_metadata(request.uri(), request.headers(), state.sanitizer.as_ref())?;
     let original_headers = request.headers().clone();
     let original_uri = request.uri().clone();
@@ -367,19 +377,18 @@ async fn forward_local_ws_message(
     let message = match message {
         LocalWsMessage::Text(text) if text.len() <= limit => {
             sizes.0 = text.len();
-            let (safe, categories) = sanitizer.sanitize_traced(&text).into_parts();
+            let (safe, message_observations) = sanitize_websocket_json(&text, sanitizer)?;
             sizes.1 = safe.len();
-            observations.extend(
-                categories
-                    .into_iter()
-                    .map(|category| Observation::new(category, "/websocket")),
-            );
+            observations.extend(message_observations);
             UpstreamWsMessage::Text(safe.into())
         }
-        LocalWsMessage::Ping(bytes) => UpstreamWsMessage::Ping(bytes),
-        LocalWsMessage::Pong(bytes) => UpstreamWsMessage::Pong(bytes),
+        LocalWsMessage::Ping(bytes) if bytes.is_empty() => UpstreamWsMessage::Ping(bytes),
+        LocalWsMessage::Pong(bytes) if bytes.is_empty() => UpstreamWsMessage::Pong(bytes),
         LocalWsMessage::Close(_) => UpstreamWsMessage::Close(None),
-        LocalWsMessage::Text(_) | LocalWsMessage::Binary(_) => return Err(()),
+        LocalWsMessage::Text(_)
+        | LocalWsMessage::Binary(_)
+        | LocalWsMessage::Ping(_)
+        | LocalWsMessage::Pong(_) => return Err(()),
     };
     upstream.send(message).await.map_err(|_| ())?;
     Ok((sizes.0, sizes.1, observations))
@@ -396,24 +405,35 @@ async fn forward_upstream_ws_message(
     let message = match message {
         UpstreamWsMessage::Text(text) if text.len() <= limit => {
             sizes.0 = text.len();
-            let (safe, categories) = sanitizer.sanitize_traced(&text).into_parts();
+            let (safe, message_observations) = sanitize_websocket_json(&text, sanitizer)?;
             sizes.1 = safe.len();
-            observations.extend(
-                categories
-                    .into_iter()
-                    .map(|category| Observation::new(category, "/websocket")),
-            );
+            observations.extend(message_observations);
             LocalWsMessage::Text(safe.into())
         }
-        UpstreamWsMessage::Ping(bytes) => LocalWsMessage::Ping(bytes),
-        UpstreamWsMessage::Pong(bytes) => LocalWsMessage::Pong(bytes),
+        UpstreamWsMessage::Ping(bytes) if bytes.is_empty() => LocalWsMessage::Ping(bytes),
+        UpstreamWsMessage::Pong(bytes) if bytes.is_empty() => LocalWsMessage::Pong(bytes),
         UpstreamWsMessage::Close(_) => LocalWsMessage::Close(None),
-        UpstreamWsMessage::Text(_) | UpstreamWsMessage::Binary(_) | UpstreamWsMessage::Frame(_) => {
-            return Err(());
-        }
+        UpstreamWsMessage::Text(_)
+        | UpstreamWsMessage::Binary(_)
+        | UpstreamWsMessage::Ping(_)
+        | UpstreamWsMessage::Pong(_)
+        | UpstreamWsMessage::Frame(_) => return Err(()),
     };
     local.send(message).await.map_err(|_| ())?;
     Ok((sizes.0, sizes.1, observations))
+}
+
+fn sanitize_websocket_json(
+    text: &str,
+    sanitizer: &dyn Sanitizer,
+) -> Result<(String, Vec<Observation>), ()> {
+    let mut value: Value = serde_json::from_str(text).map_err(|_| ())?;
+    if !value.is_object() {
+        return Err(());
+    }
+    let observations = sanitize_json(Provider::OpenAi, &mut value, sanitizer)?;
+    let safe = serde_json::to_string(&value).map_err(|_| ())?;
+    Ok((safe, observations))
 }
 
 async fn forward_inner(
@@ -444,6 +464,7 @@ async fn forward_inner(
     let (body, observations) = sanitize_body(
         upstream.provider,
         BodySource::Request,
+        path,
         request_type,
         &body,
         state.sanitizer.as_ref(),
@@ -477,6 +498,7 @@ async fn forward_inner(
     let (body, observations) = sanitize_body(
         upstream.provider,
         BodySource::Response,
+        path,
         response_type,
         &body,
         state.sanitizer.as_ref(),
@@ -487,12 +509,14 @@ async fn forward_inner(
     trace.response_after = body.len();
     trace.observe(observations);
 
-    let mut response = Response::builder().status(status);
-    for (name, value) in &headers {
-        if !is_hop_by_hop(name) {
-            response = response.header(name, value);
-        }
-    }
+    let response_type = if response_type.is_some_and(is_sse) {
+        "text/event-stream"
+    } else {
+        "application/json"
+    };
+    let response = Response::builder()
+        .status(status)
+        .header(CONTENT_TYPE, response_type);
     response
         .body(Body::from(body))
         .map_err(|_| ProxyError::new(ErrorCode::UpstreamFailure))
@@ -519,10 +543,10 @@ async fn collect_response(
 }
 
 fn reject_unsupported_method(method: &Method) -> Result<(), ProxyError> {
-    if method == Method::CONNECT || method == Method::TRACE {
-        Err(ProxyError::new(ErrorCode::InvalidRequest))
-    } else {
+    if method == Method::POST {
         Ok(())
+    } else {
+        Err(ProxyError::new(ErrorCode::InvalidRequest))
     }
 }
 
@@ -566,7 +590,7 @@ fn reject_sensitive_request_metadata(
         if is_hop_by_hop(name) || is_provider_auth_header(name) {
             continue;
         }
-        if is_credential_header_name(name) {
+        if is_credential_header_name(name) || sanitizer.sanitize(name.as_str()) != name.as_str() {
             return Err(ProxyError::new(ErrorCode::SensitiveMetadata));
         }
         let value = value
@@ -650,21 +674,23 @@ fn reject_oversize_reqwest_length(
 fn sanitize_body(
     provider: Provider,
     source: BodySource,
+    path: &str,
     content_type: Option<&str>,
     body: &[u8],
     sanitizer: &dyn Sanitizer,
 ) -> Result<(Vec<u8>, Vec<Observation>), ProxyError> {
-    if body.is_empty() {
-        return Ok((Vec::new(), Vec::new()));
-    }
-    if content_type.is_some_and(is_sse) {
-        return sanitize_sse(provider, body, sanitizer)
-            .map_err(|()| ProxyError::new(ErrorCode::InvalidJson));
+    if source == BodySource::Response
+        && provider == Provider::Anthropic
+        && matches!(path.trim_matches('/'), "messages" | "v1/messages")
+        && content_type.is_some_and(is_sse)
+    {
+        return sanitize_sse(body, sanitizer).map_err(|()| ProxyError::new(ErrorCode::InvalidJson));
     }
     if content_type.is_some_and(is_json) {
         let mut value: Value =
             serde_json::from_slice(body).map_err(|_| ProxyError::new(ErrorCode::InvalidJson))?;
-        let observations = sanitize_json(provider, &mut value, sanitizer);
+        let observations = sanitize_json(provider, &mut value, sanitizer)
+            .map_err(|()| ProxyError::new(ErrorCode::InvalidJson))?;
         let output =
             serde_json::to_vec(&value).map_err(|_| ProxyError::new(ErrorCode::InvalidJson))?;
         return Ok((output, observations));
