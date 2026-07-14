@@ -16,8 +16,11 @@ use axum::{
     extract::ws::{Message as LocalWsMessage, WebSocket, WebSocketUpgrade},
     extract::{FromRequestParts, Path, State},
     http::{
-        HeaderMap, HeaderName, HeaderValue, Method, Request, Response, Uri,
-        header::{CONNECTION, CONTENT_LENGTH, CONTENT_TYPE, HOST, TRANSFER_ENCODING, UPGRADE},
+        HeaderMap, HeaderName, HeaderValue, Method, Request, Response, StatusCode, Uri,
+        header::{
+            ACCEPT_ENCODING, AUTHORIZATION, CONNECTION, CONTENT_LENGTH, CONTENT_TYPE, HOST,
+            TRANSFER_ENCODING, UPGRADE,
+        },
     },
     response::IntoResponse,
     routing::any,
@@ -35,12 +38,14 @@ use tokio_util::sync::CancellationToken;
 use blindfold_trace::{Category, Coverage, Issue, Outcome, Record, Replacement, Route};
 
 use crate::{
-    Config, ConfigError, ErrorCode, Provider, ProxyError, Sanitizer, Upstream,
+    Config, ConfigError, ErrorCode, Provider, ProxyError, SanitizedText, Sanitizer, Upstream,
     sanitize::{Observation, sanitize_json, sanitize_sse},
 };
 
 const LOOP_HEADER: HeaderName = HeaderName::from_static("x-blindfold-proxy-hop");
 const LOOP_VALUE: HeaderValue = HeaderValue::from_static("1");
+const CHAINED_LOOP_VALUE: HeaderValue = HeaderValue::from_static("2");
+const X_API_KEY: HeaderName = HeaderName::from_static("x-api-key");
 static NEXT_REQUEST_ID: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Clone, Copy, Eq, PartialEq)]
@@ -199,6 +204,17 @@ async fn forward(
         return ProxyError::new(ErrorCode::UpstreamNotAllowed).into_response();
     };
     let mut trace = RequestTrace::new(upstream.provider);
+    if request.method() == Method::HEAD
+        && upstream.provider == Provider::Anthropic
+        && path.is_empty()
+        && request.uri().query().is_none()
+    {
+        trace.emit(state.trace_sink.as_deref(), None);
+        return Response::builder()
+            .status(StatusCode::OK)
+            .body(Body::empty())
+            .unwrap_or_else(|_| ProxyError::new(ErrorCode::UpstreamFailure).into_response());
+    }
     if is_websocket_upgrade(request.headers()) {
         return forward_websocket(state, upstream_name, path, request, trace).await;
     }
@@ -231,10 +247,14 @@ async fn forward_websocket(
     request: Request<Body>,
     mut trace: RequestTrace,
 ) -> Response<Body> {
-    let result = forward_websocket_inner(&state, &upstream_name, &path, request).await;
+    let sanitizer = state.upstreams.get(&upstream_name).map_or_else(
+        || Arc::clone(&state.sanitizer),
+        |upstream| sanitizer_for_upstream(&state.sanitizer, upstream),
+    );
+    let result =
+        forward_websocket_inner(&state, &upstream_name, &path, request, sanitizer.as_ref()).await;
     match result {
         Ok((upgrade, upstream)) => {
-            let sanitizer = Arc::clone(&state.sanitizer);
             let request_limit = state.max_request_body;
             let response_limit = state.max_response_body;
             let trace_sink = state.trace_sink.clone();
@@ -265,6 +285,7 @@ async fn forward_websocket_inner(
     upstream_name: &str,
     path: &str,
     request: Request<Body>,
+    sanitizer: &dyn Sanitizer,
 ) -> Result<
     (
         WebSocketUpgrade,
@@ -278,9 +299,7 @@ async fn forward_websocket_inner(
         .upstreams
         .get(upstream_name)
         .ok_or_else(|| ProxyError::new(ErrorCode::UpstreamNotAllowed))?;
-    if request.headers().contains_key(&LOOP_HEADER) {
-        return Err(ProxyError::new(ErrorCode::ProxyLoop));
-    }
+    let has_trusted_proxy_hop = accept_proxy_hop(request.headers(), upstream)?;
     if upstream.provider != Provider::OpenAi
         || !matches!(path.trim_matches('/'), "responses" | "v1/responses")
         || request.method() != Method::GET
@@ -288,7 +307,7 @@ async fn forward_websocket_inner(
     {
         return Err(ProxyError::new(ErrorCode::UnsupportedTransport));
     }
-    reject_sensitive_request_metadata(request.uri(), request.headers(), state.sanitizer.as_ref())?;
+    reject_sensitive_request_metadata(request.uri(), request.headers(), sanitizer)?;
     let original_headers = request.headers().clone();
     let original_uri = request.uri().clone();
     let (mut parts, _) = request.into_parts();
@@ -307,11 +326,22 @@ async fn forward_websocket_inner(
         .as_str()
         .into_client_request()
         .map_err(|_| ProxyError::new(ErrorCode::UnsupportedTransport))?;
+    let replaces_provider_auth = upstream.gateway_credential.is_some();
     for (name, value) in &original_headers {
-        if !is_websocket_handshake_header(name) && !is_hop_by_hop(name) {
+        if !(is_websocket_handshake_header(name)
+            || is_hop_by_hop(name)
+            || name == ACCEPT_ENCODING
+            || replaces_provider_auth && is_provider_auth_header(name))
+        {
             upstream_request.headers_mut().insert(name, value.clone());
         }
     }
+    if let Some((name, value)) = gateway_auth_header(upstream) {
+        upstream_request.headers_mut().insert(name, value);
+    }
+    upstream_request
+        .headers_mut()
+        .insert(LOOP_HEADER, next_proxy_hop_marker(has_trusted_proxy_hop));
     let (upstream_socket, _) = match connect_async(upstream_request).await {
         Ok(connection) => connection,
         Err(tokio_tungstenite::tungstenite::Error::Http(response)) => {
@@ -447,13 +477,13 @@ async fn forward_inner(
         .upstreams
         .get(upstream_name)
         .ok_or_else(|| ProxyError::new(ErrorCode::UpstreamNotAllowed))?;
-    if request.headers().contains_key(&LOOP_HEADER) {
-        return Err(ProxyError::new(ErrorCode::ProxyLoop));
-    }
+    let sanitizer = sanitizer_for_upstream(&state.sanitizer, upstream);
+    let has_trusted_proxy_hop = accept_proxy_hop(request.headers(), upstream)?;
+    reject_unsupported_gateway_path(upstream, path, request.uri())?;
     reject_unsupported_transport(request.headers())?;
     reject_unsupported_method(request.method())?;
     reject_oversize_content_length(request.headers(), state.max_request_body)?;
-    reject_sensitive_request_metadata(request.uri(), request.headers(), state.sanitizer.as_ref())?;
+    reject_sensitive_request_metadata(request.uri(), request.headers(), sanitizer.as_ref())?;
 
     let (parts, body) = request.into_parts();
     let body = to_bytes(body, state.max_request_body)
@@ -467,22 +497,30 @@ async fn forward_inner(
         path,
         request_type,
         &body,
-        state.sanitizer.as_ref(),
+        sanitizer.as_ref(),
     )
     .inspect_err(|error| {
         trace.issue = Some(issue_for(error.code(), BodySource::Request));
+        eprintln!("Blindfold: provider request body rejected before upstream forwarding");
     })?;
     trace.request_after = body.len();
     trace.observe(observations);
     let url = destination_url(&upstream.base_url, path, &parts.uri);
 
     let mut outbound = state.client.request(parts.method, url).body(body);
+    let replaces_provider_auth = upstream.gateway_credential.is_some();
     for (name, value) in &parts.headers {
-        if !is_hop_by_hop(name) {
+        if !(is_hop_by_hop(name)
+            || name == ACCEPT_ENCODING
+            || replaces_provider_auth && is_provider_auth_header(name))
+        {
             outbound = outbound.header(name, value);
         }
     }
-    outbound = outbound.header(LOOP_HEADER, LOOP_VALUE);
+    if let Some((name, value)) = gateway_auth_header(upstream) {
+        outbound = outbound.header(name, value);
+    }
+    outbound = outbound.header(LOOP_HEADER, next_proxy_hop_marker(has_trusted_proxy_hop));
 
     let upstream_response = outbound
         .send()
@@ -501,10 +539,11 @@ async fn forward_inner(
         path,
         response_type,
         &body,
-        state.sanitizer.as_ref(),
+        sanitizer.as_ref(),
     )
     .inspect_err(|error| {
         trace.issue = Some(issue_for(error.code(), BodySource::Response));
+        eprintln!("Blindfold: provider response body rejected before client release");
     })?;
     trace.response_after = body.len();
     trace.observe(observations);
@@ -607,6 +646,99 @@ fn is_provider_auth_header(name: &HeaderName) -> bool {
     matches!(name.as_str(), "authorization" | "x-api-key" | "api-key")
 }
 
+fn accept_proxy_hop(headers: &HeaderMap, upstream: &Upstream) -> Result<bool, ProxyError> {
+    let mut values = headers.get_all(&LOOP_HEADER).iter();
+    let Some(value) = values.next() else {
+        return Ok(false);
+    };
+    if values.next().is_some() || !upstream.trusted_proxy_hop || value != LOOP_VALUE {
+        return Err(ProxyError::new(ErrorCode::ProxyLoop));
+    }
+    Ok(true)
+}
+
+fn next_proxy_hop_marker(has_trusted_proxy_hop: bool) -> HeaderValue {
+    if has_trusted_proxy_hop {
+        CHAINED_LOOP_VALUE
+    } else {
+        LOOP_VALUE
+    }
+}
+
+fn gateway_auth_header(upstream: &Upstream) -> Option<(HeaderName, HeaderValue)> {
+    let credential = upstream.gateway_credential.as_ref()?;
+    let name = match upstream.provider {
+        Provider::OpenAi => AUTHORIZATION,
+        Provider::Anthropic => X_API_KEY,
+    };
+    Some((name, credential.header_value().clone()))
+}
+
+fn sanitizer_for_upstream(
+    sanitizer: &Arc<dyn Sanitizer>,
+    upstream: &Upstream,
+) -> Arc<dyn Sanitizer> {
+    let Some(credential) = &upstream.gateway_credential else {
+        return Arc::clone(sanitizer);
+    };
+    Arc::new(CredentialSanitizer {
+        inner: Arc::clone(sanitizer),
+        credential: credential.secret().to_owned(),
+    })
+}
+
+struct CredentialSanitizer {
+    inner: Arc<dyn Sanitizer>,
+    credential: String,
+}
+
+impl Sanitizer for CredentialSanitizer {
+    fn sanitize(&self, text: &str) -> String {
+        self.inner
+            .sanitize(text)
+            .replace(&self.credential, "[REDACTED]")
+    }
+
+    fn sanitize_traced(&self, text: &str) -> SanitizedText {
+        let (mut safe, mut categories) = self.inner.sanitize_traced(text).into_parts();
+        if safe.contains(&self.credential) {
+            safe = safe.replace(&self.credential, "[REDACTED]");
+            categories.push(Category::Sensitive);
+        }
+        SanitizedText::new(safe, categories)
+    }
+}
+
+fn reject_unsupported_gateway_path(
+    upstream: &Upstream,
+    path: &str,
+    uri: &Uri,
+) -> Result<(), ProxyError> {
+    if upstream.gateway_credential.is_none() {
+        return Ok(());
+    }
+    let query_supported = match upstream.provider {
+        Provider::Anthropic => uri.query().is_none_or(|query| query == "beta=true"),
+        Provider::OpenAi => uri.query().is_none(),
+    };
+    if !query_supported {
+        return Err(ProxyError::new(ErrorCode::InvalidRequest));
+    }
+    let path = path.trim_matches('/');
+    let supported = match upstream.provider {
+        Provider::Anthropic => matches!(path, "messages" | "v1/messages"),
+        Provider::OpenAi => matches!(
+            path,
+            "chat/completions" | "v1/chat/completions" | "responses" | "v1/responses"
+        ),
+    };
+    if supported {
+        Ok(())
+    } else {
+        Err(ProxyError::new(ErrorCode::InvalidRequest))
+    }
+}
+
 fn is_credential_header_name(name: &HeaderName) -> bool {
     let name = name.as_str();
     matches!(
@@ -684,7 +816,19 @@ fn sanitize_body(
         && matches!(path.trim_matches('/'), "messages" | "v1/messages")
         && content_type.is_some_and(is_sse)
     {
-        return sanitize_sse(body, sanitizer).map_err(|()| ProxyError::new(ErrorCode::InvalidJson));
+        return sanitize_sse(body, provider, sanitizer)
+            .map_err(|()| ProxyError::new(ErrorCode::InvalidJson));
+    }
+    if source == BodySource::Response
+        && provider == Provider::OpenAi
+        && matches!(
+            path.trim_matches('/'),
+            "chat/completions" | "v1/chat/completions"
+        )
+        && content_type.is_some_and(is_sse)
+    {
+        return sanitize_sse(body, provider, sanitizer)
+            .map_err(|()| ProxyError::new(ErrorCode::InvalidJson));
     }
     if content_type.is_some_and(is_json) {
         let mut value: Value =

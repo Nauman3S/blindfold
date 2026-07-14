@@ -118,7 +118,7 @@ impl ErrorCode {
             Self::ProxyLoop => "proxy loop rejected",
             Self::RequestTooLarge => "request body is too large",
             Self::ResponseTooLarge => "upstream response is too large",
-            Self::InvalidJson => "JSON or Anthropic SSE payload could not be sanitized",
+            Self::InvalidJson => "JSON or supported SSE payload could not be sanitized",
             Self::InvalidRequest => "request method or content type is unsupported",
             Self::SensitiveMetadata => "request metadata contains sensitive content",
             Self::UnsupportedTransport => "request transport is unsupported and was not forwarded",

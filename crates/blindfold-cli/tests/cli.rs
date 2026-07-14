@@ -22,6 +22,31 @@ use blindfold_vault::{MasterKey, Scope, Vault};
 
 static NEXT_TEMP: AtomicU64 = AtomicU64::new(0);
 const PROVIDER_FIXTURE: &str = "sk-proj-abcdefghijklmnopqrstuvwxyz012345";
+const VALID_PLUGIN_MANIFEST: &str = r#"
+manifest_version = 1
+id = "test.example-adapter"
+version = "1.2.3"
+kind = "harness-adapter"
+protocol = "stdio-json-v1"
+entrypoint = "bin/adapter"
+
+[harness]
+command = "example-agent"
+version = ">=1.2.0, <2.0.0"
+noninteractive_modes = ["exec"]
+
+[capabilities]
+providers = ["open-ai"]
+transports = ["http-json"]
+events = ["model-request", "model-response"]
+
+[permissions]
+filesystem = ["plugin-read", "workspace-read"]
+network = ["model-proxy"]
+environment = ["path"]
+spawn_harness = true
+spawn_tools = false
+"#;
 
 struct TestDirectory(PathBuf);
 
@@ -122,11 +147,23 @@ fn fake_agent(directory: &Path, agent: &str) -> Result<PathBuf, std::io::Error> 
 
 fn fake_agent_version(agent: &str) -> &'static str {
     match agent {
-        "claude" => "2.1.152 (Claude Code)",
-        "codex" => "codex-cli 0.144.1",
-        "opencode" => "1.17.3",
+        "claude" => "2.1.202 (Claude Code)",
+        "codex" => "codex-cli 0.144.4",
+        "opencode" => "1.18.0",
         _ => "unsupported 0.0.0",
     }
+}
+
+fn fake_plugin(directory: &Path) -> Result<PathBuf, std::io::Error> {
+    let plugin = directory.join("explicit-plugin");
+    let binary = plugin.join("bin/adapter");
+    fs::create_dir_all(binary.parent().unwrap_or(&plugin))?;
+    fs::write(plugin.join("blindfold-plugin.toml"), VALID_PLUGIN_MANIFEST)?;
+    fs::write(&binary, "#!/bin/sh\ntouch \"$(dirname \"$0\")/executed\"\n")?;
+    let mut permissions = fs::metadata(&binary)?.permissions();
+    permissions.set_mode(0o700);
+    fs::set_permissions(binary, permissions)?;
+    Ok(plugin)
 }
 
 fn fake_incompatible_agent(directory: &Path, version: &str) -> Result<PathBuf, std::io::Error> {
@@ -148,7 +185,7 @@ fn fake_connect_agent(directory: &Path) -> Result<PathBuf, std::io::Error> {
     fs::write(
         &path,
         r#"#!/bin/sh
-if [ "${1-}" = --version ]; then printf '%s\n' '1.17.3'; exit 0; fi
+if [ "${1-}" = --version ]; then printf '%s\n' '1.18.0'; exit 0; fi
 ruby -rsocket -ruri -e '
 proxy = URI(ENV.fetch("HTTPS_PROXY"))
 socket = TCPSocket.new(proxy.host, proxy.port)
@@ -169,7 +206,7 @@ fn fake_leaky_agent(directory: &Path) -> Result<PathBuf, std::io::Error> {
     let path = directory.join("codex");
     let script = format!(
         r#"#!/bin/sh
-if [ "${{1-}}" = --version ]; then printf '%s\n' 'codex-cli 0.144.1'; exit 0; fi
+if [ "${{1-}}" = --version ]; then printf '%s\n' 'codex-cli 0.144.4'; exit 0; fi
 printf '%s\n' 'stdout {PROVIDER_FIXTURE}'
 printf '%s\n' 'stderr {PROVIDER_FIXTURE}' >&2
 exit 7
@@ -370,6 +407,13 @@ fn help_and_version_are_available() -> Result<(), Box<dyn Error>> {
     assert!(help.status.success());
     assert!(stdout(&help).contains("doctor"));
     assert!(stdout(&help).contains("mask"));
+    assert!(stdout(&help).contains("plugin"));
+    assert!(stdout(&help).contains("container"));
+    assert!(
+        !stdout(&help)
+            .lines()
+            .any(|line| { line.split_whitespace().next() == Some("boundary") })
+    );
     assert!(!stdout(&help).contains("shell-init"));
     let run_help = blindfold(directory.path(), &["run", "--help"])?;
     assert!(run_help.status.success());
@@ -391,6 +435,105 @@ fn help_and_version_are_available() -> Result<(), Box<dyn Error>> {
         stdout(&short).trim(),
         format!("blindfold {}", env!("CARGO_PKG_VERSION"))
     );
+    Ok(())
+}
+
+#[test]
+fn locked_container_cli_fails_before_docker_on_missing_or_invalid_inputs()
+-> Result<(), Box<dyn Error>> {
+    let directory = TestDirectory::new()?;
+    let missing_key = blindfold_command(directory.path())
+        .args(["container", "run", "codex", "--", "exec", "hello"])
+        .env_remove("OPENAI_API_KEY")
+        .output()?;
+    assert!(!missing_key.status.success());
+    assert!(stderr(&missing_key).contains("provider credential environment variable is not set"));
+    assert!(missing_key.stdout.is_empty());
+
+    let wrong_provider = blindfold(
+        directory.path(),
+        &[
+            "container",
+            "run",
+            "claude",
+            "--provider",
+            "openai",
+            "--",
+            "--print",
+            "hello",
+        ],
+    )?;
+    assert!(!wrong_provider.status.success());
+    assert!(stderr(&wrong_provider).contains("require the Anthropic provider"));
+
+    let mutable_image = blindfold_command(directory.path())
+        .args([
+            "container",
+            "run",
+            "codex",
+            "--image",
+            "example.invalid/blindfold:latest",
+            "--",
+            "exec",
+            "hello",
+        ])
+        .env("OPENAI_API_KEY", "test-only-provider-value")
+        .output()?;
+    assert!(!mutable_image.status.success());
+    assert!(stderr(&mutable_image).contains("@sha256 digest"));
+    assert!(!stderr(&mutable_image).contains("test-only-provider-value"));
+    assert!(mutable_image.stdout.is_empty());
+    Ok(())
+}
+
+#[test]
+fn plugin_list_reports_embedded_manifests_without_probing_harnesses() -> Result<(), Box<dyn Error>>
+{
+    let directory = TestDirectory::new()?;
+    let output = blindfold_command(directory.path())
+        .args(["plugin", "list"])
+        .env("PATH", directory.path())
+        .output()?;
+
+    assert!(output.status.success(), "{}", stderr(&output));
+    let rendered = stdout(&output);
+    assert_eq!(rendered.lines().count(), 3);
+    assert!(rendered.contains(
+        "dev.blindfold.claude-code plugin=0.1.0 protocol=builtin-v1 command=claude harness=\"=2.1.202\" modes=print"
+    ));
+    assert!(rendered.contains(
+        "dev.blindfold.codex-cli plugin=0.1.0 protocol=builtin-v1 command=codex harness=\"=0.144.4\" modes=exec,review"
+    ));
+    assert!(rendered.contains(
+        "dev.blindfold.opencode plugin=0.1.0 protocol=builtin-v1 command=opencode harness=\"=1.18.0\" modes=run"
+    ));
+    Ok(())
+}
+
+#[test]
+fn plugin_validate_checks_only_explicit_absolute_directories_without_execution()
+-> Result<(), Box<dyn Error>> {
+    let directory = TestDirectory::new()?;
+    let plugin = fake_plugin(directory.path())?;
+    let plugin_arg = plugin.to_str().ok_or("test path is not UTF-8")?;
+    let output = blindfold(directory.path(), &["plugin", "validate", plugin_arg])?;
+
+    assert!(output.status.success(), "{}", stderr(&output));
+    let rendered = stdout(&output);
+    assert!(rendered.contains(
+        "test.example-adapter plugin=1.2.3 protocol=stdio-json-v1 command=example-agent harness=\">=1.2.0, <2.0.0\" modes=exec"
+    ));
+    assert!(rendered.contains(
+        "Validated 1 explicit plugin directory; no plugin was installed, activated, or executed."
+    ));
+    assert!(!rendered.contains(plugin_arg));
+    assert!(!plugin.join("bin/executed").exists());
+
+    let relative = blindfold(directory.path(), &["plugin", "validate", "explicit-plugin"])?;
+    assert!(!relative.status.success());
+    assert!(stderr(&relative).contains("explicit plugin directory is invalid"));
+    assert!(relative.stdout.is_empty());
+    assert!(!plugin.join("bin/executed").exists());
     Ok(())
 }
 

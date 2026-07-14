@@ -15,3 +15,4 @@ current contract; a later decision owns the new direction.
 | [0007](0007-detector-dependencies.md) | Detector dependency selection | Accepted |
 | [0008](0008-constrained-noninteractive-runner.md) | One constrained noninteractive runner | Accepted |
 | [0009](0009-harness-adapter-security-boundary.md) | Declarative, explicitly installed harness adapters | Manifest host and built-in gates implemented |
+| [0010](0010-locked-container-egress-boundary.md) | Locked model-only container boundary | Preview implemented |

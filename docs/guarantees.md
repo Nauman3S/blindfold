@@ -32,6 +32,21 @@ establish its controls must be reported as degraded or unprotected. A future
 whole-agent containment mode must refuse to start when any required OS control is
 missing.
 
+For a supported `bf container run` invocation that passes every startup check, an
+additional egress-path guarantee applies: the agent process tree has Docker's `none`
+network and no non-loopback route, while its only cross-container IPC is the session
+Unix socket to Blindfold's gateway. Subject to the trusted host/runtime/image and no
+container escape, ordinary agent and tool processes cannot open a direct IP path. The
+gateway owns the real provider credential and permits only the supported sanitized
+model transport. This guarantee does not apply to native `bf run`.
+
+Regression tests verify the constructed Docker controls. A 2026-07-14 manual Docker
+Desktop run additionally verified the live namespace, mounts, direct-IP and DNS
+failure, gateway reachability, and cleanup described in
+[Locked Container Boundary](container-boundary.md). Locked mode remains preview because
+the automated suite does not start Docker and a cross-platform release matrix is still
+missing. That evidence boundary does not broaden the claim above.
+
 The harness-adapter layer does not expand these guarantees by itself. Built-in runs now
 validate their strict embedded manifests, exact declared capability contracts, resolved
 commands, and pinned harness versions before proxy startup. A version check does not
@@ -52,6 +67,8 @@ Blindfold does not guarantee:
 - containment of a malicious process, operating system, user account, or dependency;
 - prevention of exfiltration by a child process intentionally given a secret;
 - detection of every secret or sensitive semantic fact;
+- detection of an encoded, split, encrypted, transformed, or semantically reconstructed
+  value inside an otherwise supported model request;
 - protection against memory inspection, swap, debuggers, hardware, or side channels;
 - deletion from backups after encrypted local records are removed;
 - availability under hostile or excessively large input; or
@@ -62,9 +79,14 @@ future hook could sanitize a supported tool result before the next model call, a
 provider proxy can enforce the final supported model crossing. A tool can still open a
 direct network connection or read a host file unless OS containment prevents it.
 
-In particular, `bf run` does not mediate `.env`, home-directory credential files,
+In particular, native `bf run` does not mediate `.env`, home-directory credential files,
 persistent agent login stores, or direct sockets opened by clients that ignore proxy
 settings. It is a managed model-traffic boundary, not whole-agent containment.
+
+Locked container mode does not mount the host home or agent credential stores, but the
+current workspace is mounted directly. The agent can read raw project files. The OS
+boundary forces ordinary outbound model traffic through Blindfold; detector completeness
+still determines whether a sensitive value inside that permitted channel is replaced.
 
 ## Accurate Status
 
@@ -74,8 +96,9 @@ Documentation and startup output must use these terms consistently:
 - **Degraded:** some controls are active, but a documented limitation reduces coverage.
 - **Unprotected:** the path is outside Blindfold or required controls are unavailable.
 
-The project must not use absolute claims such as "secrets can never leak" or imply that
-future sandbox, filesystem mediation, or network egress controls already exist.
+The project must not use absolute claims such as "secrets can never leak." It may claim
+the implemented locked egress topology only with its host/runtime/no-escape assumptions
+and payload-detection limitations attached.
 
 Installing a harness adapter must not be described as trusting its entrypoint or
 enabling whole-agent protection. Project-local plugins are never auto-loaded, and the

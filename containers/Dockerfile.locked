@@ -1,0 +1,31 @@
+# syntax=docker/dockerfile:1.7
+
+FROM rust:1.96.0-bookworm AS blindfold-build
+WORKDIR /src
+COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
+COPY crates ./crates
+RUN cargo build --locked --release -p blindfold-cli
+
+FROM node:22-bookworm-slim
+
+ARG CLAUDE_CODE_VERSION=2.1.202
+ARG CODEX_VERSION=0.144.4
+ARG OPENCODE_VERSION=1.18.0
+
+RUN apt-get update \
+    && apt-get install --yes --no-install-recommends ca-certificates \
+    && rm -rf /var/lib/apt/lists/* \
+    && npm install --global --omit=dev \
+      "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}" \
+      "@openai/codex@${CODEX_VERSION}" \
+      "opencode-ai@${OPENCODE_VERSION}" \
+    && npm cache clean --force
+
+COPY --from=blindfold-build /src/target/release/blindfold /usr/local/bin/blindfold
+COPY --from=blindfold-build /src/target/release/bf /usr/local/bin/bf
+
+RUN mkdir -p /workspace /home/agent \
+    && chmod 1777 /home/agent
+
+WORKDIR /workspace
+CMD ["blindfold", "--help"]

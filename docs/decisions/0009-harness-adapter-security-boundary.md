@@ -55,10 +55,10 @@ would be untrusted and unsupported shapes would fail closed. Hooks are defense i
 not the final model boundary: the provider proxy still parses and sanitizes every
 supported model request and response before forwarding.
 
-Neither hooks nor the provider proxy contain a tool that opens its own socket. Direct
-tool network exfiltration, raw filesystem reads, IPC, and clients that bypass configured
-proxies require OS-enforced process, filesystem, and network containment. Until those
-controls exist, adapter-backed sessions remain managed model-traffic boundaries.
+Neither hooks nor the provider proxy contains the whole process tree. Native direct tool
+network exfiltration, raw filesystem reads, IPC, and clients that bypass configured
+proxies require OS-enforced containment. ADR 0010 adds the locked model-only network
+boundary; staged filesystem containment remains future work.
 
 ## Consequences
 
@@ -69,7 +69,8 @@ controls exist, adapter-backed sessions remain managed model-traffic boundaries.
   synthetic sensitive values before it can be reported as protected.
 - A hook can reduce the time sensitive tool output remains visible to the harness, but
   the provider proxy remains the authoritative check before a model boundary crossing.
-- Whole-agent secrecy remains a separate release gate requiring OS containment.
+- Whole-agent secrecy remains a separate release gate requiring staged filesystem
+  containment and stronger payload assumptions in addition to ADR 0010's network tier.
 
 ## Implementation Status
 

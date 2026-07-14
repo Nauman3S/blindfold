@@ -6,8 +6,10 @@ Blindfold is a local-first security boundary for AI coding workflows. It scans a
 redacts secrets, runs commands with selected environment values, proxies supported LLM
 traffic, and records safe metadata without intentionally logging raw values.
 
-Blindfold protects only operations routed through Blindfold. It is not an OS sandbox,
-network firewall, or guarantee that every unknown secret format will be detected.
+Blindfold protects only operations routed through Blindfold. Native `bf run` is not an
+OS sandbox. The preview `bf container run` mode adds an OS-enforced model-only network
+boundary, but it is still not a guarantee that every unknown or transformed secret will
+be detected.
 
 **New here? Start with [Simple Use Cases](USE_CASES.md).** It explains the common
 commands without requiring you to understand the full architecture.
@@ -22,10 +24,11 @@ This repository is pre-release software:
   detection of RFC-valid email addresses and international phone numbers. The strict
   TOML adapter-manifest API, explicit-directory plugin loader, and exact harness
   version probes are also implemented.
-- **Preview:** constrained noninteractive Claude, Codex, and OpenCode wrappers; MCP
+- **Preview:** constrained noninteractive Claude, Codex, and OpenCode wrappers; locked
+  Docker `network=none` agent runs with a credential-owning Unix-socket gateway; MCP
   stdio transformer; Python and TypeScript SDKs.
-- **Not implemented:** OS keychain adapter, transparent network interception, filesystem
-  sandbox, broad semantic PII discovery (names, addresses, national IDs), MCP network
+- **Not implemented:** OS keychain adapter, a sanitized/staged filesystem workspace,
+  broad semantic PII discovery (names, addresses, national IDs), MCP network
   transports, Windows support, external adapter execution, and native harness
   pre/post-tool hook injection.
 
@@ -282,9 +285,10 @@ curl http://127.0.0.1:8787/openai/chat/completions \
 ```
 
 The proxy accepts JSON POST bodies and sanitizes every string value, including nested
-tool arguments. The only streaming exceptions are bounded Anthropic response SSE and
-JSON-object text frames on the OpenAI Responses WebSocket endpoint. SSE requests,
-OpenAI SSE, binary or arbitrary WebSockets, unsupported non-empty media types, sensitive
+tool arguments. The only streaming exceptions are bounded Anthropic response SSE,
+bounded OpenAI-compatible response SSE on `chat/completions`, and JSON-object text
+frames on the OpenAI Responses WebSocket endpoint. SSE requests, SSE on any other
+route, binary or arbitrary WebSockets, unsupported non-empty media types, sensitive
 URL/query values, proxy loops, and other HTTP methods fail closed. Provider
 authentication headers (`Authorization`, `x-api-key`, and `api-key`) are intentionally
 forwarded only to the allowlisted upstream and must be managed by the caller.
@@ -340,7 +344,47 @@ automatic detector set. The Python SDK provides the same explicit application bo
 with a provider-client wrapper.
 
 See [Noninteractive coding agents](docs/coding-agents.md) for the exact protocol and
-argument contract.
+argument contract. See [Plugin manifests and validation](docs/plugins.md) for embedded
+adapter discovery and validation-only external directory checks.
+
+## Locked Container Runs
+
+Build the local evaluation image once, export the standard provider key on the host,
+then keep the same noninteractive agent arguments:
+
+```sh
+docker build -f containers/Dockerfile.locked -t blindfold-locked:local .
+
+: "${ANTHROPIC_API_KEY:?set ANTHROPIC_API_KEY on the host}"
+bf container run claude -- --print "summarize this repo"
+
+: "${OPENAI_API_KEY:?set OPENAI_API_KEY on the host}"
+bf container run codex -- exec "summarize this repo"
+
+: "${OPENROUTER_API_KEY:?set OPENROUTER_API_KEY on the host}"
+bf container run opencode --provider openrouter -- run "inspect this project"
+```
+
+The host key is materialized in a private temporary file and mounted read-only into the
+gateway container. It is never mounted into the agent container. The agent receives
+Docker's `none` network, a read/write mount of only the current workspace, an ephemeral
+home, and a read-only per-session volume containing one Unix socket. The gateway owns
+the only external network path, discards agent-supplied provider authentication, injects
+its own credential, and forwards only supported sanitized model requests. Generic web,
+package, Git, SSH, and CONNECT traffic is unavailable in this mode.
+
+Use `--credential-file /absolute/path` instead of the standard provider environment
+variable when desired. Release images must be selected with
+`--image registry/name@sha256:<digest>`; only `blindfold-locked:local` is accepted as a
+tagged development image.
+
+This establishes a meaningful egress guarantee: subject to the trusted host, Docker
+Engine, image, and absence of a container escape, the agent process tree has no direct
+IP egress. It does not make detection perfect. An agent can transform, encode, split,
+or semantically reconstruct a sensitive fact inside the permitted model channel, and
+the raw mounted workspace can contain values Blindfold does not recognize. See
+[Locked container boundary](docs/container-boundary.md) for the exact claim and threat
+model.
 
 ### Harness Adapters
 
@@ -370,8 +414,9 @@ incompatible output rejects the run before proxy startup. A version probe is a
 compatibility check, not executable authentication or process containment. Tool-result
 hook events are reserved but not declared by current manifests until replacement
 behavior is verified.
-The provider proxy remains the final check for supported model traffic. Neither layer
-prevents direct socket exfiltration; that requires future OS containment. See
+The provider proxy remains the final check for supported model traffic. Native `bf run`
+does not prevent direct socket exfiltration; `bf container run` adds that OS network
+boundary without claiming perfect payload detection. See
 [ADR 0009](docs/decisions/0009-harness-adapter-security-boundary.md).
 
 Manifest permissions describe the compatibility environment the runner supplies; they
@@ -511,9 +556,12 @@ Blindfold does not protect:
 - Windows.
 
 Read [Guarantees](docs/guarantees.md), [Threat Model](THREAT_MODEL.md),
+[Locked container boundary](docs/container-boundary.md),
 [Noninteractive coding agents](docs/coding-agents.md),
 [Claude Code limitations](docs/claude-code.md), [MCP preview](docs/mcp.md), and
-[application SDKs](docs/sdk.md) before using Blindfold.
+[application SDKs](docs/sdk.md) before using Blindfold. The
+[adversarial verification report](BLINDFOLD_STRESS_TEST_REPORT.md) separates tested
+behavior from release evidence that remains incomplete.
 
 The [proxy and protocol lifecycle note](docs/proxy-protocol-lifecycle.md) records which
 model-boundary features remain required and which compatibility branches may be

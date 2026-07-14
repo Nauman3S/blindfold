@@ -135,7 +135,13 @@ fn sanitize_textual_leaves(
                 )?;
             }
         }
-        _ => {}
+        Value::Number(number) => {
+            let text = number.to_string();
+            if sanitizer.sanitize(&text) != text {
+                return Err(());
+            }
+        }
+        Value::Null | Value::Bool(_) => {}
     }
     Ok(())
 }
@@ -158,36 +164,127 @@ fn sanitize_string(
 
 pub(crate) fn sanitize_sse(
     body: &[u8],
+    provider: Provider,
     sanitizer: &dyn Sanitizer,
 ) -> Result<(Vec<u8>, Vec<Observation>), ()> {
     let text = std::str::from_utf8(body).map_err(|_| ())?;
-    let (text, categories) = sanitizer.sanitize_traced(text).into_parts();
-    let mut observations = categories
-        .into_iter()
-        .map(|category| Observation::new(category, "/sse"))
-        .collect::<Vec<_>>();
-    let mut output = String::with_capacity(text.len());
+    let text = text.strip_prefix('\u{feff}').unwrap_or(text);
+    let normalized = text.replace("\r\n", "\n").replace('\r', "\n");
+    let mut observations = Vec::new();
+    let mut output = String::with_capacity(normalized.len());
+    let mut event = SseEvent::default();
 
-    for segment in text.split_inclusive('\n') {
-        let line = segment.strip_suffix('\n').unwrap_or(segment);
-        let ending = if segment.ends_with('\n') { "\n" } else { "" };
-        if let Some(data) = line.strip_prefix("data:") {
-            let padding = if data.starts_with(' ') { " " } else { "" };
-            let payload = data.strip_prefix(' ').unwrap_or(data);
-            let mut json: Value = serde_json::from_str(payload).map_err(|_| ())?;
-            observations.extend(sanitize_json(Provider::Anthropic, &mut json, sanitizer)?);
-            output.push_str("data:");
-            output.push_str(padding);
-            output.push_str(&serde_json::to_string(&json).map_err(|_| ())?);
-        } else if line.is_empty() || line.starts_with("event:") {
-            output.push_str(line);
-        } else {
-            return Err(());
+    for line in normalized.split('\n') {
+        if line.is_empty() {
+            event.write_sanitized(&mut output, provider, sanitizer, &mut observations)?;
+            continue;
         }
-        output.push_str(ending);
+        event.push(line);
     }
+    event.write_sanitized(&mut output, provider, sanitizer, &mut observations)?;
 
     Ok((output.into_bytes(), observations))
+}
+
+#[derive(Default)]
+struct SseEvent {
+    event: Option<String>,
+    id: Option<String>,
+    retry: Option<String>,
+    data: Vec<String>,
+}
+
+impl SseEvent {
+    fn push(&mut self, line: &str) {
+        if line.starts_with(':') {
+            return;
+        }
+        let (field, value) = line.split_once(':').unwrap_or((line, ""));
+        let value = value.strip_prefix(' ').unwrap_or(value);
+        match field {
+            "event" => self.event = Some(value.to_owned()),
+            "data" => self.data.push(value.to_owned()),
+            "id" if !value.contains('\0') => self.id = Some(value.to_owned()),
+            "retry" if !value.is_empty() && value.bytes().all(|byte| byte.is_ascii_digit()) => {
+                self.retry = Some(value.to_owned());
+            }
+            _ => {}
+        }
+    }
+
+    fn write_sanitized(
+        &mut self,
+        output: &mut String,
+        provider: Provider,
+        sanitizer: &dyn Sanitizer,
+        observations: &mut Vec<Observation>,
+    ) -> Result<(), ()> {
+        if self.event.is_none() && self.id.is_none() && self.retry.is_none() && self.data.is_empty()
+        {
+            return Ok(());
+        }
+
+        if let Some(event) = self.event.take() {
+            write_sse_text_field(
+                output,
+                "event",
+                &event,
+                sanitizer,
+                "/sse/event",
+                observations,
+            )?;
+        }
+        if let Some(id) = self.id.take() {
+            write_sse_text_field(output, "id", &id, sanitizer, "/sse/id", observations)?;
+        }
+        if let Some(retry) = self.retry.take() {
+            if sanitizer.sanitize(&retry) != retry {
+                return Err(());
+            }
+            output.push_str("retry: ");
+            output.push_str(&retry);
+            output.push('\n');
+        }
+        if !self.data.is_empty() {
+            let payload = self.data.join("\n");
+            self.data.clear();
+            if provider == Provider::OpenAi && payload == "[DONE]" {
+                output.push_str("data: [DONE]\n\n");
+                return Ok(());
+            }
+            let mut json: Value = serde_json::from_str(&payload).map_err(|_| ())?;
+            observations.extend(sanitize_json(provider, &mut json, sanitizer)?);
+            output.push_str("data: ");
+            output.push_str(&serde_json::to_string(&json).map_err(|_| ())?);
+            output.push('\n');
+        }
+        output.push('\n');
+        Ok(())
+    }
+}
+
+fn write_sse_text_field(
+    output: &mut String,
+    name: &str,
+    value: &str,
+    sanitizer: &dyn Sanitizer,
+    pointer: &str,
+    observations: &mut Vec<Observation>,
+) -> Result<(), ()> {
+    let (safe, categories) = sanitizer.sanitize_traced(value).into_parts();
+    if safe.contains(['\r', '\n', '\0']) {
+        return Err(());
+    }
+    observations.extend(
+        categories
+            .into_iter()
+            .map(|category| Observation::new(category, pointer)),
+    );
+    output.push_str(name);
+    output.push_str(": ");
+    output.push_str(&safe);
+    output.push('\n');
+    Ok(())
 }
 
 #[cfg(test)]
@@ -214,10 +311,71 @@ mod tests {
     fn sanitizes_anthropic_sse_text_delta() -> Result<(), &'static str> {
         let sanitizer = ExactValueSanitizer::new("raw-secret", "[safe]")?;
         let body = b"event: content_block_delta\ndata: {\"delta\":{\"type\":\"text_delta\",\"text\":\"raw-secret\"}}\n\n";
-        let (output, _) = sanitize_sse(body, &sanitizer).map_err(|()| "SSE")?;
+        let (output, _) =
+            sanitize_sse(body, Provider::Anthropic, &sanitizer).map_err(|()| "SSE")?;
         let text = std::str::from_utf8(&output).map_err(|_| "UTF-8")?;
         assert!(!text.contains("raw-secret"));
         assert!(text.contains("[safe]"));
+        Ok(())
+    }
+
+    #[test]
+    fn sanitizes_standard_crlf_sse_framing_and_metadata() -> Result<(), &'static str> {
+        let sanitizer = ExactValueSanitizer::new("raw-secret", "[safe]")?;
+        let body = b"\xef\xbb\xbf: keepalive raw-secret\r\nid: raw-secret\r\nretry: 1000\r\nevent: content_block_delta\r\ndata: {\"delta\":{\"type\":\"text_delta\",\"text\":\"raw-secret\"}}\r\n\r\n";
+        let (output, observations) =
+            sanitize_sse(body, Provider::Anthropic, &sanitizer).map_err(|()| "standard SSE")?;
+        let text = std::str::from_utf8(&output).map_err(|_| "UTF-8")?;
+
+        assert!(!text.contains("raw-secret"));
+        assert!(!text.contains("keepalive"));
+        assert!(text.contains("id: [safe]\n"));
+        assert!(text.contains("retry: 1000\n"));
+        assert!(text.contains("\"text\":\"[safe]\""));
+        assert!(
+            observations
+                .iter()
+                .any(|observation| observation.pointer == "/sse/id")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn rejects_non_json_sse_data_and_sensitive_numbers() -> Result<(), &'static str> {
+        let sanitizer = ExactValueSanitizer::new("4111111111111111", "[safe]")?;
+
+        assert!(
+            sanitize_sse(
+                b"event: done\ndata: [DONE]\n\n",
+                Provider::Anthropic,
+                &sanitizer
+            )
+            .is_err()
+        );
+        assert!(
+            sanitize_sse(
+                b"event: number\ndata: {\"account\":4111111111111111}\n\n",
+                Provider::Anthropic,
+                &sanitizer
+            )
+            .is_err()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn sanitizes_openai_sse_and_accepts_only_exact_done() -> Result<(), &'static str> {
+        let sanitizer = ExactValueSanitizer::new("raw-secret", "[safe]")?;
+        let body = b"data: {\"id\":\"chunk-1\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"raw-secret\"}}]}\n\ndata: [DONE]\n\n";
+        let (output, observations) =
+            sanitize_sse(body, Provider::OpenAi, &sanitizer).map_err(|()| "OpenAI SSE")?;
+        let text = std::str::from_utf8(&output).map_err(|_| "UTF-8")?;
+
+        assert!(!text.contains("raw-secret"));
+        assert!(text.contains("[safe]"));
+        assert!(text.ends_with("data: [DONE]\n\n"));
+        assert!(!observations.is_empty());
+        assert!(sanitize_sse(b"data: [DONE] \n\n", Provider::OpenAi, &sanitizer).is_err());
         Ok(())
     }
 

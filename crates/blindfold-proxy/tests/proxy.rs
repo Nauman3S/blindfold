@@ -12,12 +12,14 @@ use axum::{
     extract::State,
     http::{
         HeaderMap, HeaderValue, Request, Response, StatusCode,
-        header::{AUTHORIZATION, CONTENT_TYPE},
+        header::{ACCEPT_ENCODING, AUTHORIZATION, CONTENT_TYPE},
     },
     response::IntoResponse,
     routing::post,
 };
-use blindfold_proxy::{Config, ExactValueSanitizer, Provider, Proxy, TraceSink, Upstream};
+use blindfold_proxy::{
+    Config, ConfigError, ExactValueSanitizer, Provider, Proxy, TraceSink, Upstream,
+};
 use blindfold_trace::Record;
 use futures_util::{SinkExt, StreamExt};
 use tokio::{
@@ -38,6 +40,7 @@ use tokio_tungstenite::{
 use tokio_util::sync::CancellationToken;
 
 const SECRET: &str = "raw-secret-value";
+const TRUSTED_CREDENTIAL: &str = "trusted-gateway-credential";
 
 #[derive(Clone, Default)]
 struct Capture {
@@ -170,6 +173,243 @@ async fn provider_authentication_header_is_forwarded_to_allowlisted_upstream()
     );
     proxy_stop.cancel();
     let _ = upstream_stop.send(());
+    Ok(())
+}
+
+#[tokio::test]
+async fn anthropic_root_head_probe_is_answered_locally_without_upstream()
+-> Result<(), Box<dyn std::error::Error>> {
+    let capture = Capture::default();
+    let (upstream, upstream_stop) = spawn_upstream(capture.clone(), openai_response()).await?;
+    let (proxy, proxy_stop) = spawn_proxy(upstream, Provider::Anthropic).await?;
+
+    let response = reqwest::Client::new()
+        .head(format!("{proxy}/anthropic"))
+        .send()
+        .await?;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert!(
+        capture
+            .headers
+            .lock()
+            .map_err(|_| "capture poisoned")?
+            .is_empty()
+    );
+
+    proxy_stop.cancel();
+    let _ = upstream_stop.send(());
+    Ok(())
+}
+
+#[tokio::test]
+async fn gateway_openai_credential_replaces_all_client_provider_auth_headers()
+-> Result<(), Box<dyn std::error::Error>> {
+    let capture = Capture::default();
+    let (upstream, upstream_stop) = spawn_upstream(capture.clone(), openai_response()).await?;
+    let config =
+        proxy_config_with_gateway_credential(upstream, Provider::OpenAi, TRUSTED_CREDENTIAL)?;
+    let (proxy, proxy_stop) = spawn_proxy_with_config(config).await?;
+
+    reqwest::Client::new()
+        .post(format!("{proxy}/openai/v1/chat/completions"))
+        .header(CONTENT_TYPE, "application/json")
+        .header(AUTHORIZATION, "Bearer client-spoof")
+        .header("x-api-key", "client-spoof")
+        .header("api-key", "client-spoof")
+        .header(ACCEPT_ENCODING, "gzip, deflate, br, zstd")
+        .body(r#"{"model":"test-model"}"#)
+        .send()
+        .await?
+        .error_for_status()?;
+
+    let headers = capture.headers.lock().map_err(|_| "capture poisoned")?;
+    assert_eq!(headers.len(), 1);
+    assert_eq!(
+        headers[0]
+            .get(AUTHORIZATION)
+            .and_then(|value| value.to_str().ok()),
+        Some("Bearer trusted-gateway-credential")
+    );
+    assert!(!headers[0].contains_key("x-api-key"));
+    assert!(!headers[0].contains_key("api-key"));
+    assert!(!headers[0].contains_key(ACCEPT_ENCODING));
+
+    proxy_stop.cancel();
+    let _ = upstream_stop.send(());
+    Ok(())
+}
+
+#[tokio::test]
+async fn gateway_anthropic_credential_replaces_all_client_provider_auth_headers()
+-> Result<(), Box<dyn std::error::Error>> {
+    let capture = Capture::default();
+    let (upstream, upstream_stop) = spawn_upstream(capture.clone(), openai_response()).await?;
+    let config =
+        proxy_config_with_gateway_credential(upstream, Provider::Anthropic, TRUSTED_CREDENTIAL)?;
+    let (proxy, proxy_stop) = spawn_proxy_with_config(config).await?;
+
+    reqwest::Client::new()
+        .post(format!("{proxy}/anthropic/v1/messages"))
+        .header(CONTENT_TYPE, "application/json")
+        .header(AUTHORIZATION, "Bearer client-spoof")
+        .header("x-api-key", "client-spoof")
+        .header("api-key", "client-spoof")
+        .body(r#"{"model":"test-model"}"#)
+        .send()
+        .await?
+        .error_for_status()?;
+
+    let headers = capture.headers.lock().map_err(|_| "capture poisoned")?;
+    assert_eq!(headers.len(), 1);
+    assert_eq!(
+        headers[0]
+            .get("x-api-key")
+            .and_then(|value| value.to_str().ok()),
+        Some(TRUSTED_CREDENTIAL)
+    );
+    assert!(!headers[0].contains_key(AUTHORIZATION));
+    assert!(!headers[0].contains_key("api-key"));
+
+    proxy_stop.cancel();
+    let _ = upstream_stop.send(());
+    Ok(())
+}
+
+#[tokio::test]
+async fn gateway_credential_is_sanitized_from_payloads_in_both_directions()
+-> Result<(), Box<dyn std::error::Error>> {
+    let capture = Capture::default();
+    let response = json_response(&serde_json::json!({"output": TRUSTED_CREDENTIAL}))?;
+    let (upstream, upstream_stop) = spawn_upstream(capture.clone(), response).await?;
+    let config =
+        proxy_config_with_gateway_credential(upstream, Provider::OpenAi, TRUSTED_CREDENTIAL)?;
+    let (proxy, proxy_stop) = spawn_proxy_with_config(config).await?;
+
+    let response = reqwest::Client::new()
+        .post(format!("{proxy}/openai/v1/chat/completions"))
+        .header(CONTENT_TYPE, "application/json")
+        .body(serde_json::to_vec(&serde_json::json!({
+            "input": TRUSTED_CREDENTIAL
+        }))?)
+        .send()
+        .await?
+        .error_for_status()?
+        .text()
+        .await?;
+
+    let bodies = capture.bodies.lock().map_err(|_| "capture poisoned")?;
+    assert_eq!(bodies.len(), 1);
+    assert!(!std::str::from_utf8(&bodies[0])?.contains(TRUSTED_CREDENTIAL));
+    assert!(!response.contains(TRUSTED_CREDENTIAL));
+    assert!(response.contains("[REDACTED]"));
+
+    proxy_stop.cancel();
+    let _ = upstream_stop.send(());
+    Ok(())
+}
+
+#[tokio::test]
+async fn gateway_credential_rejects_non_model_endpoint_before_upstream()
+-> Result<(), Box<dyn std::error::Error>> {
+    let capture = Capture::default();
+    let (upstream, upstream_stop) = spawn_upstream(capture.clone(), openai_response()).await?;
+    let config =
+        proxy_config_with_gateway_credential(upstream, Provider::OpenAi, TRUSTED_CREDENTIAL)?;
+    let (proxy, proxy_stop) = spawn_proxy_with_config(config).await?;
+
+    let response = reqwest::Client::new()
+        .post(format!("{proxy}/openai/v1/files"))
+        .header(CONTENT_TYPE, "application/json")
+        .body("{}")
+        .send()
+        .await?;
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert!(response.text().await?.contains("invalid_request"));
+    assert!(
+        capture
+            .headers
+            .lock()
+            .map_err(|_| "capture poisoned")?
+            .is_empty()
+    );
+
+    proxy_stop.cancel();
+    let _ = upstream_stop.send(());
+    Ok(())
+}
+
+#[tokio::test]
+async fn gateway_credential_rejects_model_endpoint_query_before_upstream()
+-> Result<(), Box<dyn std::error::Error>> {
+    let capture = Capture::default();
+    let (upstream, upstream_stop) = spawn_upstream(capture.clone(), openai_response()).await?;
+    let config =
+        proxy_config_with_gateway_credential(upstream, Provider::OpenAi, TRUSTED_CREDENTIAL)?;
+    let (proxy, proxy_stop) = spawn_proxy_with_config(config).await?;
+
+    let response = reqwest::Client::new()
+        .post(format!("{proxy}/openai/v1/responses?metadata=opaque"))
+        .header(CONTENT_TYPE, "application/json")
+        .body(r#"{"model":"test-model"}"#)
+        .send()
+        .await?;
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert!(
+        capture
+            .headers
+            .lock()
+            .map_err(|_| "capture poisoned")?
+            .is_empty()
+    );
+
+    proxy_stop.cancel();
+    let _ = upstream_stop.send(());
+    Ok(())
+}
+
+#[tokio::test]
+async fn gateway_anthropic_credential_accepts_only_the_required_beta_query()
+-> Result<(), Box<dyn std::error::Error>> {
+    let capture = Capture::default();
+    let (upstream, upstream_stop) = spawn_upstream(capture.clone(), openai_response()).await?;
+    let config =
+        proxy_config_with_gateway_credential(upstream, Provider::Anthropic, TRUSTED_CREDENTIAL)?;
+    let (proxy, proxy_stop) = spawn_proxy_with_config(config).await?;
+
+    reqwest::Client::new()
+        .post(format!("{proxy}/anthropic/v1/messages?beta=true"))
+        .header(CONTENT_TYPE, "application/json")
+        .body(r#"{"model":"test-model"}"#)
+        .send()
+        .await?
+        .error_for_status()?;
+    assert_eq!(
+        capture
+            .headers
+            .lock()
+            .map_err(|_| "capture poisoned")?
+            .len(),
+        1
+    );
+
+    proxy_stop.cancel();
+    let _ = upstream_stop.send(());
+    Ok(())
+}
+
+#[test]
+fn gateway_credential_is_redacted_from_debug_output() -> Result<(), Box<dyn std::error::Error>> {
+    let upstream = Upstream::new("openai", "https://api.example.test", Provider::OpenAi)?
+        .with_gateway_credential(TRUSTED_CREDENTIAL)?;
+    let upstream_debug = format!("{upstream:?}");
+    assert!(!upstream_debug.contains(TRUSTED_CREDENTIAL));
+    assert!(upstream_debug.contains("[REDACTED]"));
+
+    let config = Config {
+        upstreams: vec![upstream],
+        ..Config::default()
+    };
+    assert!(!format!("{config:?}").contains(TRUSTED_CREDENTIAL));
     Ok(())
 }
 
@@ -554,7 +794,83 @@ async fn rejects_sse_requests_before_the_upstream() -> Result<(), Box<dyn std::e
 }
 
 #[tokio::test]
-async fn rejects_openai_sse_responses() -> Result<(), Box<dyn std::error::Error>> {
+async fn sanitizes_openai_chat_completion_sse_and_preserves_done()
+-> Result<(), Box<dyn std::error::Error>> {
+    let capture = Capture::default();
+    let response = streamed_response(
+        [Bytes::from(format!(
+            "data: {{\"id\":\"chunk-1\",\"object\":\"chat.completion.chunk\",\"choices\":[{{\"index\":0,\"delta\":{{\"content\":\"echo {SECRET}\"}}}}]}}\n\ndata: [DONE]\n\n"
+        ))],
+        "text/event-stream",
+    );
+    let (upstream, upstream_stop) = spawn_upstream(capture, response).await?;
+    let (proxy, proxy_stop) = spawn_proxy(upstream, Provider::OpenAi).await?;
+
+    let response = reqwest::Client::new()
+        .post(format!("{proxy}/openai/v1/chat/completions"))
+        .header(CONTENT_TYPE, "application/json")
+        .body(serde_json::to_vec(&serde_json::json!({
+            "model": "openai/gpt-4o-mini",
+            "messages": [
+                {"role": "system", "content": "safe system context"},
+                {"role": "user", "content": "safe prompt"}
+            ],
+            "stream": true,
+            "tool_choice": "auto",
+            "tools": [{
+                "type": "function",
+                "function": {
+                    "name": "read",
+                    "description": "read a file",
+                    "parameters": {"type": "object"}
+                }
+            }]
+        }))?)
+        .send()
+        .await?;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response.headers().get(CONTENT_TYPE),
+        Some(&HeaderValue::from_static("text/event-stream"))
+    );
+    let body = response.text().await?;
+    assert!(!body.contains(SECRET));
+    assert!(body.contains("echo [REDACTED]"));
+    assert!(body.ends_with("data: [DONE]\n\n"));
+
+    proxy_stop.cancel();
+    let _ = upstream_stop.send(());
+    Ok(())
+}
+
+#[tokio::test]
+async fn rejects_opaque_openai_chat_completion_sse() -> Result<(), Box<dyn std::error::Error>> {
+    let capture = Capture::default();
+    let response = streamed_response(
+        [Bytes::from(format!("data: opaque-{SECRET}\n\n"))],
+        "text/event-stream",
+    );
+    let (upstream, upstream_stop) = spawn_upstream(capture, response).await?;
+    let (proxy, proxy_stop) = spawn_proxy(upstream, Provider::OpenAi).await?;
+
+    let response = reqwest::Client::new()
+        .post(format!("{proxy}/openai/v1/chat/completions"))
+        .header(CONTENT_TYPE, "application/json")
+        .body("{}")
+        .send()
+        .await?;
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body = response.text().await?;
+    assert!(!body.contains(SECRET));
+    assert!(body.contains("invalid_json"));
+
+    proxy_stop.cancel();
+    let _ = upstream_stop.send(());
+    Ok(())
+}
+
+#[tokio::test]
+async fn rejects_openai_sse_on_unsupported_path() -> Result<(), Box<dyn std::error::Error>> {
     let capture = Capture::default();
     let response = streamed_response(
         [Bytes::from(format!("data: {{\"delta\":\"{SECRET}\"}}\n\n"))],
@@ -564,7 +880,7 @@ async fn rejects_openai_sse_responses() -> Result<(), Box<dyn std::error::Error>
     let (proxy, proxy_stop) = spawn_proxy(upstream, Provider::OpenAi).await?;
 
     let response = reqwest::Client::new()
-        .post(format!("{proxy}/openai/v1/chat/completions"))
+        .post(format!("{proxy}/openai/v1/messages"))
         .header(CONTENT_TYPE, "application/json")
         .body("{}")
         .send()
@@ -599,6 +915,81 @@ async fn rejects_proxy_hop_marker() -> Result<(), Box<dyn std::error::Error>> {
 
     proxy_stop.cancel();
     let _ = upstream_stop.send(());
+    Ok(())
+}
+
+#[tokio::test]
+async fn trusted_gateway_accepts_one_proxy_hop_and_advances_the_marker()
+-> Result<(), Box<dyn std::error::Error>> {
+    let capture = Capture::default();
+    let (upstream, upstream_stop) = spawn_upstream(capture.clone(), openai_response()).await?;
+    let config = proxy_config_with_trusted_proxy_hop(upstream, Provider::OpenAi)?;
+    let (proxy, proxy_stop) = spawn_proxy_with_config(config).await?;
+
+    reqwest::Client::new()
+        .post(format!("{proxy}/openai/v1/chat/completions"))
+        .header("x-blindfold-proxy-hop", "1")
+        .header(CONTENT_TYPE, "application/json")
+        .body("{}")
+        .send()
+        .await?
+        .error_for_status()?;
+
+    let headers = capture.headers.lock().map_err(|_| "capture poisoned")?;
+    assert_eq!(headers.len(), 1);
+    assert_eq!(
+        headers[0]
+            .get("x-blindfold-proxy-hop")
+            .and_then(|value| value.to_str().ok()),
+        Some("2")
+    );
+
+    proxy_stop.cancel();
+    let _ = upstream_stop.send(());
+    Ok(())
+}
+
+#[tokio::test]
+async fn trusted_gateway_rejects_a_second_proxy_hop_before_upstream()
+-> Result<(), Box<dyn std::error::Error>> {
+    let capture = Capture::default();
+    let (upstream, upstream_stop) = spawn_upstream(capture.clone(), openai_response()).await?;
+    let config = proxy_config_with_trusted_proxy_hop(upstream, Provider::OpenAi)?;
+    let (proxy, proxy_stop) = spawn_proxy_with_config(config).await?;
+
+    let response = reqwest::Client::new()
+        .post(format!("{proxy}/openai/v1/chat/completions"))
+        .header("x-blindfold-proxy-hop", "2")
+        .header(CONTENT_TYPE, "application/json")
+        .body("{}")
+        .send()
+        .await?;
+    assert_eq!(response.status(), StatusCode::LOOP_DETECTED);
+    assert!(
+        capture
+            .headers
+            .lock()
+            .map_err(|_| "capture poisoned")?
+            .is_empty()
+    );
+
+    proxy_stop.cancel();
+    let _ = upstream_stop.send(());
+    Ok(())
+}
+
+#[test]
+fn trusted_proxy_hop_requires_gateway_credential() -> Result<(), Box<dyn std::error::Error>> {
+    let mut config = Config::default();
+    config.upstreams.push(
+        Upstream::new("openai", "https://api.example.test", Provider::OpenAi)?
+            .with_trusted_proxy_hop(),
+    );
+    let sanitizer = Arc::new(ExactValueSanitizer::new(SECRET, "[REDACTED]")?);
+    let Err(error) = Proxy::new(config, sanitizer) else {
+        return Err("uncredentialed trusted proxy hop was accepted".into());
+    };
+    assert_eq!(error, ConfigError::UncredentialedTrustedProxyHop);
     Ok(())
 }
 
@@ -805,6 +1196,46 @@ fn proxy_config(
     Ok(config)
 }
 
+fn proxy_config_with_gateway_credential(
+    upstream_addr: std::net::SocketAddr,
+    provider: Provider,
+    credential: &str,
+) -> Result<Config, Box<dyn std::error::Error>> {
+    let route_name = match provider {
+        Provider::OpenAi => "openai",
+        Provider::Anthropic => "anthropic",
+    };
+    let mut config = Config {
+        request_timeout: Duration::from_secs(5),
+        ..Config::default()
+    };
+    config.upstreams.push(
+        Upstream::new(route_name, format!("http://{upstream_addr}"), provider)?
+            .with_gateway_credential(credential)?,
+    );
+    Ok(config)
+}
+
+fn proxy_config_with_trusted_proxy_hop(
+    upstream_addr: std::net::SocketAddr,
+    provider: Provider,
+) -> Result<Config, Box<dyn std::error::Error>> {
+    let route_name = match provider {
+        Provider::OpenAi => "openai",
+        Provider::Anthropic => "anthropic",
+    };
+    let mut config = Config {
+        request_timeout: Duration::from_secs(5),
+        ..Config::default()
+    };
+    config.upstreams.push(
+        Upstream::new(route_name, format!("http://{upstream_addr}"), provider)?
+            .with_gateway_credential(TRUSTED_CREDENTIAL)?
+            .with_trusted_proxy_hop(),
+    );
+    Ok(config)
+}
+
 async fn spawn_proxy_with_config(
     config: Config,
 ) -> Result<(String, CancellationToken), Box<dyn std::error::Error>> {
@@ -884,10 +1315,10 @@ fn json_response(value: &serde_json::Value) -> Result<Response<Body>, serde_json
 
 fn split_sse_response() -> Response<Body> {
     let first = format!(
-        "event: content_block_delta\ndata: {{\"delta\":{{\"type\":\"text_delta\",\"text\":\"{}",
+        "event: content_block_delta\r\ndata: {{\"delta\":{{\"type\":\"text_delta\",\"text\":\"{}",
         &SECRET[..7]
     );
-    let second = format!("{}\"}}}}\n\n", &SECRET[7..]);
+    let second = format!("{}\"}}}}\r\n\r\n", &SECRET[7..]);
     streamed_response(
         [Bytes::from(first), Bytes::from(second)],
         "text/event-stream",

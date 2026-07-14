@@ -35,16 +35,24 @@ A release requires:
 - supported macOS and Linux installation and end-to-end evidence;
 - no raw fixture value in captured output, logs, audit, temporary artifacts, or fake
   upstream traffic;
+- for the locked preview, a live local-Docker test proving `network=none`, the sole Unix
+  socket crossing, gateway-only provider credential and networking, absence of a
+  gateway workspace mount, fixed provider routing, and exact resource cleanup;
 - no unresolved critical or high security issue without a written decision;
 - published managed-boundary limitations;
-- no claim of whole-agent containment while filesystem and direct-network mediation are
-  absent;
+- no whole-agent or perfect-detection claim: native `bf run` has no OS containment, and
+  locked mode still exposes the raw workspace and can miss transformed or semantic
+  sensitive values;
 - checksummed artifacts; and
 - a changelog entry and annotated `vX.Y.Z` tag.
 
 An adapter manifest cannot be release evidence for a control. Evidence must come from
 core-owned enforcement and end-to-end conformance tests. External adapter execution and
 native tool hooks must be described as unimplemented until their own evidence passes.
+
+Static Docker-argv tests are regression evidence for launcher construction, not proof of
+the runtime topology. Until the live test above passes on the release candidate, locked
+mode must remain preview and must not be described as end-to-end verified.
 
 Windows artifacts must not be published for `v0.1.0`.
 

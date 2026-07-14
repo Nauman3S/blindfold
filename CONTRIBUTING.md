@@ -11,6 +11,7 @@ about their trust boundary, and backed by tests proportional to their risk.
 - Gitleaks
 - Node.js 22.6 or newer for the TypeScript SDK
 - Python 3.10 or newer and `uv` for Python SDK packaging
+- A local Docker Engine for locked-container image builds and end-to-end boundary tests
 
 The pinned Rust toolchain is installed automatically by `rustup` when commands run in the
 repository.
@@ -33,6 +34,8 @@ gitleaks detect --source . --config .github/gitleaks.toml --redact
 ```
 
 See [docs/development.md](docs/development.md) for installation and platform details.
+Docker is not required for the ordinary Rust and SDK suites. It is required before a
+change to the locked boundary can be represented as end-to-end verified.
 
 ## Security Requirements
 
@@ -46,6 +49,12 @@ See [docs/development.md](docs/development.md) for installation and platform det
 - Security-sensitive malformed or unsupported input must fail closed.
 - New agent modes must be noninteractive, have captured output, and prove both traffic
   directions against a fake upstream before becoming supported.
+- Changes to `bf container run` must prove that the agent has Docker `network=none`, the
+  gateway alone owns external networking and the real credential, the gateway has no
+  workspace mount, and cleanup targets only the exact session resources. Docker-argv
+  unit tests do not replace a live local-Engine topology test.
+- Do not add package, web, Git, SSH, MCP-network, or arbitrary CONNECT egress to the
+  locked tier. An opaque outbound channel invalidates its model-only egress claim.
 - Harness adapters must use the strict manifest schema, finite lower and upper version
   bounds, exact core-owned capability gates, and fail before proxy startup on a probe
   mismatch.
@@ -87,9 +96,11 @@ Generated dependency updates should be isolated from behavior changes where prac
 ## Architecture Decisions
 
 Material changes to the managed boundary, supported agent grammar, provider protocol,
-SafeRef format, vault, platform support,
-cryptography, serialization, network exposure, or dependency strategy require an ADR in
-`docs/decisions/`. Supersede prior decisions rather than silently rewriting history.
+SafeRef format, vault, platform support, cryptography, serialization, network exposure,
+container topology, or dependency strategy require an ADR in `docs/decisions/`.
+Supersede prior decisions rather than silently rewriting history. See
+[Locked Container Boundary](docs/container-boundary.md) and
+[Guarantees](docs/guarantees.md) for the current claim that changes must preserve.
 
 ## Pull Requests
 

@@ -7,7 +7,7 @@ use std::{
     time::Duration,
 };
 
-use reqwest::Url;
+use reqwest::{Url, header::HeaderValue};
 
 const DEFAULT_MAX_REQUEST_BODY: usize = 1024 * 1024;
 const DEFAULT_MAX_RESPONSE_BODY: usize = 8 * 1024 * 1024;
@@ -21,12 +21,36 @@ pub enum Provider {
     Anthropic,
 }
 
+#[derive(Clone)]
+pub(crate) struct GatewayCredential {
+    secret: String,
+    header_value: HeaderValue,
+}
+
+impl GatewayCredential {
+    pub(crate) fn header_value(&self) -> &HeaderValue {
+        &self.header_value
+    }
+
+    pub(crate) fn secret(&self) -> &str {
+        &self.secret
+    }
+}
+
+impl fmt::Debug for GatewayCredential {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("[REDACTED]")
+    }
+}
+
 /// A named, allowlisted upstream origin.
 #[derive(Clone, Debug)]
 pub struct Upstream {
     pub(crate) name: String,
     pub(crate) base_url: Url,
     pub(crate) provider: Provider,
+    pub(crate) gateway_credential: Option<GatewayCredential>,
+    pub(crate) trusted_proxy_hop: bool,
 }
 
 impl Upstream {
@@ -46,7 +70,45 @@ impl Upstream {
             name: name.into(),
             base_url,
             provider,
+            gateway_credential: None,
+            trusted_proxy_hop: false,
         })
+    }
+
+    /// Configures a trusted credential that replaces all client-supplied provider
+    /// authentication headers before this upstream is contacted.
+    ///
+    /// OpenAI-compatible upstreams receive an `Authorization: Bearer` header.
+    /// Anthropic-compatible upstreams receive an `x-api-key` header.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ConfigError::InvalidGatewayCredential`] when the credential is
+    /// empty or cannot be represented safely as an HTTP header value.
+    pub fn with_gateway_credential(
+        mut self,
+        credential: impl Into<String>,
+    ) -> Result<Self, ConfigError> {
+        let credential = credential.into();
+        let header_value = gateway_credential_header_value(self.provider, &credential)?;
+        self.gateway_credential = Some(GatewayCredential {
+            secret: credential,
+            header_value,
+        });
+        Ok(self)
+    }
+
+    /// Allows exactly one preceding Blindfold proxy hop on requests for this
+    /// upstream. The outgoing marker is advanced, so routing the request back
+    /// through either proxy still fails as a loop.
+    ///
+    /// This is only for an IPC-isolated gateway receiving traffic from a trusted
+    /// Blindfold proxy. Proxy configuration fails unless this upstream also has a
+    /// gateway credential.
+    #[must_use]
+    pub const fn with_trusted_proxy_hop(mut self) -> Self {
+        self.trusted_proxy_hop = true;
+        self
     }
 
     /// Returns the route name used as the first proxy path segment.
@@ -109,6 +171,10 @@ pub enum ConfigError {
     DuplicateUpstreamName,
     /// An upstream URL is malformed or is not an HTTP(S) origin/base path.
     InvalidUpstreamUrl,
+    /// A trusted gateway credential is empty or is not a valid HTTP header value.
+    InvalidGatewayCredential,
+    /// A trusted proxy hop was enabled without gateway credential isolation.
+    UncredentialedTrustedProxyHop,
     /// An upstream resolves directly to the proxy listener.
     ProxyLoop,
     /// The listener could not be created.
@@ -125,6 +191,10 @@ impl fmt::Display for ConfigError {
             Self::InvalidUpstreamName => "an upstream name is invalid",
             Self::DuplicateUpstreamName => "upstream names must be unique",
             Self::InvalidUpstreamUrl => "an upstream URL is invalid",
+            Self::InvalidGatewayCredential => "a gateway credential is invalid",
+            Self::UncredentialedTrustedProxyHop => {
+                "a trusted proxy hop requires a gateway credential"
+            }
             Self::ProxyLoop => "an upstream points to the proxy listener",
             Self::BindFailed => "the proxy listener could not be created",
         })
@@ -161,10 +231,27 @@ impl Config {
             if !names.insert(upstream.name.as_str()) {
                 return Err(ConfigError::DuplicateUpstreamName);
             }
+            if upstream.trusted_proxy_hop && upstream.gateway_credential.is_none() {
+                return Err(ConfigError::UncredentialedTrustedProxyHop);
+            }
             validate_url(&upstream.base_url)?;
         }
         Ok(())
     }
+}
+
+fn gateway_credential_header_value(
+    provider: Provider,
+    credential: &str,
+) -> Result<HeaderValue, ConfigError> {
+    if credential.is_empty() {
+        return Err(ConfigError::InvalidGatewayCredential);
+    }
+    let value = match provider {
+        Provider::OpenAi => format!("Bearer {credential}"),
+        Provider::Anthropic => credential.to_owned(),
+    };
+    HeaderValue::from_str(&value).map_err(|_| ConfigError::InvalidGatewayCredential)
 }
 
 fn validate_url(url: &Url) -> Result<(), ConfigError> {

@@ -27,9 +27,15 @@ its transports and configuration behavior are tested.
 
 | Adapter | Accepted harness version |
 |---|---|
-| Claude Code | `2.1.152` |
-| Codex CLI | `0.144.1` |
-| OpenCode | `1.17.3` |
+| Claude Code | `2.1.202` |
+| Codex CLI | `0.144.4` |
+| OpenCode | `1.18.0` |
+
+These exact pins were refreshed from the published npm distribution tags on
+2026-07-14: [Claude Code](https://www.npmjs.com/package/@anthropic-ai/claude-code),
+[Codex CLI](https://www.npmjs.com/package/@openai/codex), and
+[OpenCode](https://www.npmjs.com/package/opencode-ai). They are tested compatibility
+claims, not open-ended version ranges.
 
 Missing, malformed, ambiguous, truncated, timed-out, nonzero, or incompatible version
 output fails before agent startup. The probe executes the selected harness binary, so it
@@ -54,10 +60,11 @@ The transport contract is intentionally narrow:
 | `claude --print ...` / `claude -p ...` | Anthropic JSON POST; bounded Anthropic response SSE |
 | `codex exec ...` | OpenAI JSON POST or JSON-object text frames on `/responses` WebSocket |
 | `codex review` | Same Codex Responses transports |
-| `opencode run ...` | OpenAI, Anthropic, or OpenRouter JSON POST; bounded Anthropic response SSE |
+| `opencode run ...` | OpenAI, Anthropic, or OpenRouter JSON POST; bounded Anthropic and OpenAI-compatible response SSE |
 
-Anthropic SSE requests, OpenAI SSE, binary WebSocket frames, arbitrary WebSocket paths,
-non-POST HTTP operations, and unsupported non-empty media types fail closed. The proxy
+SSE requests, response SSE outside Anthropic messages and OpenAI-compatible
+chat-completions, binary WebSocket frames, arbitrary WebSocket paths, non-POST HTTP
+operations, and unsupported non-empty media types fail closed. The proxy
 sanitizes every string value in accepted JSON rather than maintaining a fragile list of
 provider fields.
 
@@ -74,15 +81,16 @@ bf status
 bf deny domain api.example.com
 ```
 
-This is destination control, not arbitrary TLS inspection. A process that ignores proxy
-settings can still open a direct socket because Blindfold does not yet install an OS
-network sandbox.
+This is destination control, not arbitrary TLS inspection. During native `bf run`, a
+process that ignores proxy settings can still open a direct socket because that mode
+does not install an OS network sandbox.
 
 ## Credential And File Boundary
 
-Parent API-key variables and unrelated environment values are not inherited. Provider
-authentication currently uses the agent's persistent login or credential store; it is
-not yet brokered by Blindfold.
+Parent API-key variables and unrelated environment values are not inherited. In native
+`bf run`, provider authentication uses the agent's persistent login or credential
+store; it is not brokered by Blindfold. Locked mode uses the separate gateway-owned host
+credential described below.
 
 The agent still runs in the real working directory. If it opens `.env`, `.env.local`, a
 cloud credential file, or another readable path, it receives the file exactly as stored.
@@ -92,8 +100,31 @@ Use `bf mask`, `bf redact`, `bf exec`, and `bf call` for their explicit managed 
 
 Consequently, `bf run` is a managed model-traffic boundary, not whole-agent containment.
 It must not be described as guaranteeing that an agent cannot read or directly
-exfiltrate a local secret. That stronger guarantee requires the planned isolated
-workspace, credential broker, and OS-enforced process/network sandbox.
+exfiltrate a local secret. Locked mode closes ordinary direct IP egress, but the stronger
+claim that the agent cannot obtain a raw project secret still requires a staged
+sanitized workspace and scanned patch export.
+
+## Locked Container Mode
+
+Use `bf container run` when direct network bypass must be OS-blocked:
+
+```sh
+bf container run claude -- --print "summarize this repo"
+bf container run codex -- exec "summarize this repo"
+bf container run opencode --provider openrouter -- run "inspect this project"
+```
+
+This mode runs the agent with Docker `--network none`. Its only cross-container path is
+a per-session filesystem Unix socket to a separate Blindfold gateway. Only the gateway
+has external networking and the real provider credential. Agent-supplied auth is
+discarded, the trusted credential is injected after payload sanitization, and no generic
+web/package/Git/SSH/CONNECT route exists. The agent process re-checks that its Linux
+network namespace has no non-loopback IPv4 or IPv6 route before starting the harness.
+
+The exact guarantee and exclusions are documented in
+[Locked Container Boundary](container-boundary.md). This blocks ordinary direct IP
+egress; it cannot guarantee that a transformed or semantic sensitive value will be
+detected inside the permitted model channel.
 
 ## Upstream Overrides
 
@@ -167,4 +198,5 @@ but `bf run claw-code` is not enabled until external execution is implemented an
 When those hooks are implemented, bounded tool results will pass through core
 sanitization before the next model call. The provider proxy will still perform the final
 request and response check. Neither mechanism stops a tool from sending data directly
-to an unmediated network destination; that guarantee requires OS containment.
+in native mode. Locked container mode supplies the separate OS egress control; hooks do
+not supersede it.

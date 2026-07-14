@@ -24,6 +24,18 @@ caller-supplied key and must not be represented as release-ready key management.
 Headless Linux support depends on a documented secure key-storage configuration and must
 not silently weaken the vault.
 
+## Locked Container Preview
+
+`bf container run` additionally requires a local Docker Engine and rejects remote
+Docker contexts. Podman and Docker-compatible remote daemons are not part of the current
+contract. On macOS the agent still runs in a Linux container inside Docker Desktop; on
+Linux it runs in the local Docker Engine. The launcher checks the agent namespace for
+the absence of non-loopback IPv4 and IPv6 routes before starting the harness.
+
+Release support for this preview requires live topology evidence on every claimed host
+platform. Static command-construction tests alone are insufficient. See
+[Locked Container Boundary](container-boundary.md).
+
 ## Windows
 
 Windows production support is deferred because process, credential-store, filesystem

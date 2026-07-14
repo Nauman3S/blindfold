@@ -7,4 +7,3 @@ __pycache__/
 .DS_Store
 .blindfold.local.yaml
 .blindfold/
-BLINDFOLD_STRESS_TEST_REPORT.md

@@ -7,7 +7,7 @@ entrypoint = "builtin/opencode"
 
 [harness]
 command = "opencode"
-version = "=1.17.3"
+version = "=1.18.0"
 noninteractive_modes = ["run"]
 
 [capabilities]

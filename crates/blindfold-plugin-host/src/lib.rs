@@ -361,8 +361,9 @@ pub fn resolve_executable(command: &OsStr, path: Option<&OsStr>) -> Result<PathB
 ///
 /// The executable must already be resolved by [`resolve_executable`]. The child receives
 /// null stdin and an otherwise empty environment containing only the supplied, revalidated
-/// absolute-only `PATH`. `expected_marker` may be `None` for version-only output such as
-/// `OpenCode`'s `1.17.3`; identity-bearing Claude and Codex manifests should supply a marker.
+/// absolute-only `PATH` and an ephemeral `HOME` equal to the probe working directory.
+/// `expected_marker` may be `None` for version-only output such as `OpenCode`'s `1.18.0`;
+/// identity-bearing Claude and Codex manifests should supply a marker.
 /// Neither captured output nor configured paths are returned in errors or `Debug` output.
 ///
 /// # Errors
@@ -390,8 +391,10 @@ where
         .prefix("blindfold-probe-")
         .tempdir()
         .map_err(|_| HostError::ProbeFailed)?;
+    let probe_path =
+        fs::canonicalize(probe_directory.path()).map_err(|_| HostError::ProbeFailed)?;
     let mut command = CommandSpec::new(program);
-    command.set_working_directory(probe_directory.path());
+    command.set_working_directory(&probe_path);
     command.args(
         arguments
             .into_iter()
@@ -404,6 +407,8 @@ where
     let mut environment = EnvironmentPolicy::new();
     let path_name = EnvironmentName::new("PATH").map_err(|_| HostError::ProbeFailed)?;
     environment.set_baseline(path_name, search_path);
+    let home_name = EnvironmentName::new("HOME").map_err(|_| HostError::ProbeFailed)?;
+    environment.set_baseline(home_name, probe_path.as_os_str());
     request.set_environment(environment);
     request.set_limits(execution_limits);
     let result = execute(&request).map_err(|_| HostError::ProbeFailed)?;

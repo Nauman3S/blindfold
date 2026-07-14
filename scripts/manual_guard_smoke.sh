@@ -60,9 +60,9 @@ make_agent() {
   local mode="$2"
   local version
   case "$mode" in
-    claude) version="2.1.152 (Claude Code)" ;;
-    codex) version="codex-cli 0.144.1" ;;
-    opencode) version="1.17.3" ;;
+    claude) version="2.1.202 (Claude Code)" ;;
+    codex) version="codex-cli 0.144.4" ;;
+    opencode) version="1.18.0" ;;
     *) echo "unknown fake mode: $mode" >&2; return 1 ;;
   esac
   cat >"$case_dir/agent.rb" <<RUBY

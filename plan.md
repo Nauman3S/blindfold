@@ -4,7 +4,8 @@
 
 ## Release Scope
 
-`v0.1.0` is a managed-boundary release, not a whole-agent sandbox.
+`v0.1.0` contains a managed native boundary plus a preview locked model-only container
+boundary. Neither is described as perfect whole-agent sensitive-data containment.
 
 Included:
 
@@ -19,6 +20,8 @@ Included:
 - dependency-free Python and TypeScript application SDKs.
 - strict TOML harness-adapter manifests, explicit-directory plugin validation, and
   fail-closed exact built-in harness version gates.
+- Docker `network=none` locked agent runs with a separate credential-owning Blindfold
+  gateway over a per-session Unix socket.
 
 Excluded:
 
@@ -26,7 +29,7 @@ Excluded:
 - shell wrappers and Blindfold bypass switches;
 - arbitrary HTTP methods, media types, streaming protocols, and agent server modes;
 - transparent TLS interception;
-- OS-enforced filesystem, process-tree, and direct-network containment;
+- staged/sanitized filesystem containment and scanned patch export;
 - brokered provider-login credentials and OS keychain-backed vault keys;
 - perfect detection of unknown or transformed sensitive values.
 - external adapter installation/execution and native agent tool-call hooks.
@@ -44,6 +47,10 @@ bf run claude -- --print "prompt"
 bf run codex -- exec "prompt"
 bf run codex -- review
 bf run opencode -- run "prompt"
+
+bf container run claude -- --print "prompt"
+bf container run codex -- exec "prompt"
+bf container run opencode --provider openrouter -- run "prompt"
 ```
 
 `bf run` has one behavior: establish the managed model boundary or fail. There is no
@@ -60,19 +67,21 @@ guard/degraded/bypass mode selector. A native agent command remains outside Blin
 | `call` | bearer value inserted only for an allowed destination | only the narrow supported request grammar is accepted |
 | provider proxy | accepted JSON/string fields sanitized in both directions | unsupported methods/media/transports fail closed |
 | agent runner | provider traffic, parent env, proxy-aware destinations, stdout/stderr | local file reads and clients ignoring proxy settings remain unmediated |
+| locked agent runner | Docker `network=none`, Unix-socket gateway, gateway-only credential, fixed provider origin | direct workspace remains readable; transformed values can evade detection |
 | harness adapter | embedded schema, capability contract, resolved command, and pinned version | version output is not executable authentication; external execution and tool-call hooks are not implemented |
 | Python SDK | registered values protected through wrapped calls and responses | same-process code and unwrapped I/O can bypass it |
 
 ## Supported Provider Protocols
 
 - OpenAI and Anthropic JSON POST bodies.
-- Anthropic `text/event-stream` responses only, bounded and sanitized before release.
+- Anthropic messages and OpenAI-compatible chat-completions `text/event-stream`
+  responses, bounded and sanitized before release.
 - OpenAI Responses WebSocket only, using JSON-object text messages.
 - Empty WebSocket ping/pong control messages.
 
-SSE requests, OpenAI SSE, arbitrary WebSocket paths, binary/opaque frames, non-POST HTTP
-operations, malformed structured payloads, and unsupported non-empty media types are
-rejected.
+SSE requests, SSE on other paths, arbitrary WebSocket paths, binary/opaque frames,
+non-POST HTTP operations, malformed structured payloads, and unsupported non-empty
+media types are rejected.
 
 ## Security Invariants
 
@@ -102,6 +111,8 @@ rejected.
 - [x] Keep startup and trace coverage honest about unmediated local file reads.
 - [x] Add strict adapter manifests and reject missing, ambiguous, or incompatible
   pinned Claude, Codex, and OpenCode versions before proxy or agent startup.
+- [x] Add a Docker `network=none` agent tier with a separate Unix-socket provider
+  gateway and gateway-only credential injection.
 
 ## Remaining Before `v0.1.0`
 
@@ -116,23 +127,23 @@ rejected.
 - [ ] Complete an external security review of the release threat model and managed
   protocol implementations.
 
-## Whole-Agent Containment Track
+## Stronger Filesystem Containment Track
 
-The stronger statement, “the agent cannot obtain a registered raw secret,” requires a
-separate containment release. Its minimum design is:
+The stronger statement, “the agent cannot obtain a registered raw secret,” still
+requires a separate filesystem-containment release. Its minimum remaining design is:
 
 1. a disposable sanitized workspace rather than the raw repository;
 2. an isolated home directory and allowlisted environment;
-3. OS-enforced filesystem, PID/IPC, inherited-descriptor, Unix-socket, and network
-   restrictions inherited by every subprocess;
+3. OS-enforced filesystem and inherited-descriptor restrictions in addition to the
+   implemented network/IPC boundary;
 4. a long-lived local broker that alone can resolve SafeRefs for an exact operation,
    destination, field, and TTL;
 5. provider authentication owned by Blindfold rather than readable agent files; and
 6. a verified patch/diff path for applying sanitized workspace changes.
 
 Protected startup must fail when any required containment primitive, transport, or scan
-is unavailable. Until that track is implemented and independently verified, `bf run`
-must never claim whole-agent containment.
+is unavailable. Until that track is implemented and independently verified, neither
+native nor locked runs may claim that all sensitive facts are unable to leave.
 
 ## Release Verification
 

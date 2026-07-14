@@ -13,6 +13,7 @@
 | Run Codex noninteractively | `bf run codex -- exec "prompt"` |
 | Run a Codex review | `bf run codex -- review` |
 | Run OpenCode noninteractively | `bf run opencode -- run "prompt"` |
+| Run an agent with OS-blocked direct IP egress | `bf container run codex -- exec "prompt"` |
 
 Interactive/TUI sessions are not part of the Blindfold runner. Run native agent commands
 directly when Blindfold is not intended to manage that invocation.
@@ -107,9 +108,9 @@ version before the proxy or agent starts:
 
 | Harness | Accepted version |
 |---|---|
-| Claude Code | `2.1.152` |
-| Codex CLI | `0.144.1` |
-| OpenCode | `1.17.3` |
+| Claude Code | `2.1.202` |
+| Codex CLI | `0.144.4` |
+| OpenCode | `1.18.0` |
 
 Missing, ambiguous, and different version output blocks the run. Version output proves
 compatibility only; it does not authenticate the executable. Future releases remain
@@ -127,6 +128,27 @@ The runner does not mediate reads from the working directory or sockets opened b
 client that ignores proxy settings. An agent opening `.env` still reads its raw content.
 Use the native command directly to operate outside Blindfold; there is intentionally no
 Blindfold bypass flag.
+
+## Run A Coding Agent With Locked Egress
+
+After building `blindfold-locked:local`, use the same noninteractive arguments:
+
+```sh
+bf container run claude -- --print "summarize this repository"
+bf container run codex -- exec "find the failing test"
+bf container run opencode --provider openrouter -- run "inspect this project"
+```
+
+The launcher reads the standard provider key from the host environment, starts a
+gateway that alone owns that credential and external networking, and starts the agent
+with Docker `network=none`. The agent can use only a per-session Unix socket to send
+supported model traffic through Blindfold. Package installation, web requests, remote
+Git, SSH, and network MCP are deliberately unavailable.
+
+This prevents ordinary direct IP bypass under the documented Docker/host/no-escape
+assumptions. It does not promise that detectors recognize encoded, transformed, or
+semantic sensitive data inside the permitted model request. See
+[Locked Container Boundary](docs/container-boundary.md).
 
 ## Python SDK
 
@@ -168,7 +190,7 @@ raw detector span.
 ## Current Guarantee Boundary
 
 For supported operations routed through Blindfold, detected or registered values are
-removed, masked, or blocked at the managed boundary. This does not guarantee detection
-of every unknown secret and does not contain an agent process that can read the host
-filesystem or bypass proxy settings. The exact contract is maintained in
+removed, masked, or blocked at the managed boundary. Native mode does not contain the
+agent process. Locked container mode contains ordinary direct IP egress but still does
+not guarantee detection of every unknown or transformed value. The exact contract is maintained in
 [Guarantees and Limitations](docs/guarantees.md).

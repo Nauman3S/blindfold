@@ -177,13 +177,13 @@ fn resolver_canonicalizes_executable_symlinks() -> Result<(), Box<dyn std::error
 }
 
 #[test]
-fn probe_clears_environment_and_accepts_compatible_stderr_version()
+fn probe_uses_ephemeral_home_and_accepts_compatible_stderr_version()
 -> Result<(), Box<dyn std::error::Error>> {
     let root = TempDir::new()?;
     let program = write_script(
         root.path(),
         "codex",
-        "if [ -n \"${HOME+x}\" ]; then exit 9; fi\nprintf 'codex-cli 0.141.2\\n' >&2",
+        "[ \"$HOME\" = \"$PWD\" ] || exit 9\nprintf 'codex-cli 0.141.2\\n' >&2",
     )?;
     let requirement = VersionReq::parse(">=0.141.0, <0.142.0")?;
     let search_path = probe_search_path(root.path())?;
@@ -277,19 +277,23 @@ fn probe_rejects_timeout_and_oversize_output() -> Result<(), Box<dyn std::error:
 #[test]
 fn probe_accepts_exact_markerless_opencode_output() -> Result<(), Box<dyn std::error::Error>> {
     let root = TempDir::new()?;
-    let program = write_script(root.path(), "opencode", "printf '1.17.3\\n'")?;
+    let program = write_script(
+        root.path(),
+        "opencode",
+        "[ \"$HOME\" = \"$PWD\" ] || exit 12; printf '1.18.0\\n'",
+    )?;
     let search_path = probe_search_path(root.path())?;
 
     let result = probe_version(
         &program,
         ["--version"],
         None,
-        &VersionReq::parse("^1.17")?,
+        &VersionReq::parse("^1.18")?,
         ProbeLimits::default(),
         &search_path,
     )?;
 
-    assert_eq!(result.version(), &Version::parse("1.17.3")?);
+    assert_eq!(result.version(), &Version::parse("1.18.0")?);
     Ok(())
 }
 

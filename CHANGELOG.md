@@ -30,13 +30,18 @@ Versioning.
   plus an explicit-directory plugin host with contained-entrypoint validation.
 - Embedded Claude, Codex, and OpenCode adapter manifests with fail-closed exact-version
   probes at `bf run` startup; `bf doctor` validates manifests without executing agents.
+- Locked Docker agent runs using `network=none`, a per-session Unix socket, and a
+  separate credential-owning Blindfold gateway with fixed provider origins.
+- Host credential environment/file input that is materialized only for the gateway and
+  replaced with non-secret agent placeholders.
 
 ### Changed
 
 - JSON sanitization now visits every string value instead of a provider-field allowlist.
 - HTTP provider forwarding is POST-only; unsupported content types fail closed even for
   empty bodies.
-- Anthropic SSE is response-only and route-gated; OpenAI SSE is rejected.
+- Anthropic and OpenAI-compatible SSE are response-only and route-gated to messages and
+  chat-completions respectively; all other SSE fails closed.
 - WebSockets are limited to JSON-object text messages on the OpenAI Responses route.
 - Agent execution no longer exposes selectable guard/degraded modes. The managed proxy,
   proxy-aware egress control, clean environment, and captured output are mandatory.
@@ -47,6 +52,8 @@ Versioning.
 - Untested older and future harness versions now fail before proxy or agent startup.
 - Unix managed execution now terminates remaining child process-group members so a
   pipe-holding descendant cannot defeat an output or version-probe timeout.
+- Gateway mode strips agent-supplied provider auth and injects only the trusted
+  gateway credential for both HTTP and WebSocket forwarding.
 
 ### Fixed
 

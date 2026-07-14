@@ -4,8 +4,9 @@
 
 The detector, policy, portable encrypted vault, masking/redaction paths, execution
 runtime, constrained application proxy, noninteractive agent runner, application SDKs,
-diff scanner, and stdio MCP preview are implemented. OS keychain adapters, whole-agent
-sandboxing, and production support evidence remain incomplete. The strict adapter
+diff scanner, stdio MCP preview, and preview locked-container egress boundary are
+implemented. OS keychain adapters, a staged/sanitized workspace, and production support
+evidence remain incomplete. The strict adapter
 manifest/host layer and built-in version gates from
 [ADR 0009](decisions/0009-harness-adapter-security-boundary.md) are implemented;
 external adapter execution and native tool hooks remain incomplete.
@@ -98,8 +99,39 @@ A future supported tool-result hook will sanitize its bounded payload before the
 can place that result in the next model request. Current built-in manifests do not claim
 that event. The provider proxy remains the final check at the model boundary because
 hooks may be absent, bypassed, or changed by an upstream harness.
-Neither layer prevents a tool from exfiltrating directly over an unmediated socket; that
-requires the planned OS containment boundary.
+Neither layer prevents a tool from exfiltrating directly during native `bf run`; that
+requires the separate OS containment boundary below.
+
+## Locked Container Boundary
+
+The preview locked path adds the OS network boundary without making harness hooks part
+of the trusted core:
+
+```text
+agent container (network=none, no non-loopback route)
+        |
+        | local HTTP expected by the harness
+        v
+Blindfold loopback relay
+        |
+        | per-session filesystem Unix socket
+        v
+Blindfold gateway container (real credential, network egress)
+        |
+        v
+fixed provider origin
+```
+
+The agent has no provider credential or external IP interface. The gateway has no
+workspace. It strips untrusted provider-auth headers, injects its gateway-only
+credential, and reuses the same bounded provider sanitizer. Docker arguments are built
+as argv, a remote Docker context is rejected, release images require digests, and the
+workspace preflight rejects special IPC/device files and nested mount devices.
+
+This architecture enforces one model-only egress route under the assumptions documented
+in [Locked Container Boundary](container-boundary.md). It does not prove payload
+semantics: transformed values can evade detection. The direct workspace mount will be
+replaced by a sanitized staging and scanned-patch export in a stronger filesystem tier.
 
 ## Trust Boundaries
 
@@ -107,9 +139,10 @@ The Blindfold process and its local vault are trusted to handle plaintext. Agent
 providers, arbitrary tools, and their output are untrusted. An approved child process is
 trusted only for the named secret and operation it was granted.
 
-The operating system and user account are prerequisites, not boundaries Blindfold can
-defend. Direct traffic, reads, or commands outside the wrapper/proxy/broker remain
-outside the managed boundary.
+The operating system and user account are prerequisites Blindfold cannot defend. Native
+direct traffic, reads, or commands outside the wrapper/proxy/broker remain outside the
+managed boundary. Locked mode additionally trusts the Docker Engine and selected image
+and assumes no runtime escape.
 
 ## Storage
 

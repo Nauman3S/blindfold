@@ -55,6 +55,10 @@ impl HarnessAdapter {
         self.manifest.id().as_str()
     }
 
+    pub(crate) const fn manifest(&self) -> &PluginManifest {
+        &self.manifest
+    }
+
     pub(crate) fn command(&self) -> &str {
         self.manifest.harness().command()
     }
@@ -93,7 +97,7 @@ fn validate_builtin_contract(
             "dev.blindfold.claude-code",
             "builtin/claude-code",
             "claude",
-            "=2.1.152",
+            "=2.1.202",
             &[Provider::Anthropic][..],
             &[Transport::HttpJson, Transport::ServerSentEvents][..],
             &[NonInteractiveMode::Print][..],
@@ -102,7 +106,7 @@ fn validate_builtin_contract(
             "dev.blindfold.codex-cli",
             "builtin/codex-cli",
             "codex",
-            "=0.144.1",
+            "=0.144.4",
             &[Provider::OpenAi][..],
             &[Transport::HttpJson, Transport::WebSocket][..],
             &[NonInteractiveMode::Exec, NonInteractiveMode::Review][..],
@@ -111,7 +115,7 @@ fn validate_builtin_contract(
             "dev.blindfold.opencode",
             "builtin/opencode",
             "opencode",
-            "=1.17.3",
+            "=1.18.0",
             &[Provider::OpenAi, Provider::Anthropic, Provider::OpenRouter][..],
             &[Transport::HttpJson, Transport::ServerSentEvents][..],
             &[NonInteractiveMode::Run][..],
@@ -250,7 +254,7 @@ mod tests {
             ("dev.blindfold.codex-cli", "dev.blindfold.other-cli"),
             ("builtin/codex-cli", "builtin/other-cli"),
             ("command = \"codex\"", "command = \"other\""),
-            ("version = \"=0.144.1\"", "version = \"=0.144.2\""),
+            ("version = \"=0.144.4\"", "version = \"=0.144.5\""),
         ] {
             let changed = original.replacen(expected, replacement, 1);
             let manifest = PluginManifest::parse_toml(changed.as_bytes())?;

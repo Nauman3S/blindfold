@@ -1,6 +1,7 @@
 # ADR 0005: Proxy Fail-Closed Compatibility Gates
 
-- Status: Accepted principle; transport grammar updated by ADR 0008
+- Status: Accepted principle; transport grammar updated by ADR 0008 and later
+  OpenAI-compatible chat-completions SSE conformance
 - Date: 2026-06-17
 
 ## Context
@@ -48,3 +49,11 @@ runner.
 Provider authentication credentials may still be sent to their intended provider as
 part of the authenticated provider request. Blindfold's managed-path promise is that project
 secrets and detected sensitive payload values are not forwarded on managed paths.
+
+## Later Update
+
+OpenCode `1.18.0` conformance established response SSE on the exact
+`chat/completions`/`v1/chat/completions` routes. That response grammar now accepts only
+JSON `data` events and exact `[DONE]`, sanitizes every JSON textual leaf, and rejects
+opaque data or SSE on all other OpenAI-compatible routes. The original fail-closed
+principle is unchanged.

@@ -26,7 +26,8 @@ use blindfold_mcp::{
     Direction as McpDirection, Resolver as McpResolver, Sanitizer as McpSanitizer,
     Transformer as McpTransformer,
 };
-use blindfold_plugin_api::NonInteractiveMode;
+use blindfold_plugin_api::{NonInteractiveMode, Protocol};
+use blindfold_plugin_host::load_explicit_plugins;
 use blindfold_policy::{Operation, Policy, Preset, Request, SourceContext};
 use blindfold_proxy::{
     Config as ProxyConfig, Provider, Proxy, Sanitizer as ProxySanitizer, Upstream,
@@ -47,7 +48,11 @@ use tokio_util::sync::CancellationToken;
 
 use crate::{
     agent_adapter::{HarnessAdapter, HarnessKind},
-    config, doctor,
+    boundary::{self, GatewayProvider},
+    config,
+    container_runner::{ContainerRunError, LockedRunSpec, run_locked},
+    doctor,
+    host_credential::HostCredential,
 };
 
 const MASTER_KEY_ENV: &str = "BLINDFOLD_MASTER_KEY";
@@ -124,6 +129,9 @@ pub(crate) async fn run() -> ExitCode {
         Some(("mcp", args)) => {
             traced_command(&root, trace_enabled, TraceRoute::Mcp, || mcp_command(args))
         }
+        Some(("plugin", args)) => plugin_command(args),
+        Some(("container", args)) => container_command(&root, args).await,
+        Some(("boundary", args)) => boundary_command(args).await,
         Some(("run", args)) => run_agent_command(&root, args, trace_enabled).await,
         _ => ExitCode::FAILURE,
     }
@@ -400,6 +408,105 @@ fn cli() -> Command {
                 .arg(Arg::new("server").long("server").default_value("preview")),
         )
         .subcommand(
+            Command::new("plugin")
+                .about("Inspect embedded adapters or validate explicit plugin directories")
+                .subcommand(Command::new("list").about("List embedded harness adapters"))
+                .subcommand(
+                    Command::new("validate")
+                        .about("Validate absolute plugin directories without executing them")
+                        .arg(
+                            Arg::new("directory")
+                                .value_name("ABSOLUTE_DIR")
+                                .value_parser(clap::value_parser!(PathBuf))
+                                .num_args(1..)
+                                .required(true),
+                        ),
+                )
+                .subcommand_required(true),
+        )
+        .subcommand(
+            Command::new("container")
+                .about("Run a coding agent in the locked model-only container boundary")
+                .subcommand(
+                    Command::new("run")
+                        .arg(
+                            Arg::new("agent")
+                                .required(true)
+                                .value_parser(["claude", "codex", "opencode"]),
+                        )
+                        .arg(
+                            Arg::new("provider")
+                                .long("provider")
+                                .value_parser(["anthropic", "openai", "openrouter"])
+                                .help("Required only to select an OpenCode provider"),
+                        )
+                        .arg(
+                            Arg::new("credential_file")
+                                .long("credential-file")
+                                .value_parser(clap::value_parser!(PathBuf))
+                                .conflicts_with("credential_env")
+                                .help("Use a host credential file instead of the provider's standard environment variable"),
+                        )
+                        .arg(
+                            Arg::new("credential_env")
+                                .long("credential-env")
+                                .conflicts_with("credential_file")
+                                .help("Read the provider credential from this host environment variable"),
+                        )
+                        .arg(
+                            Arg::new("image")
+                                .long("image")
+                                .default_value("blindfold-locked:local")
+                                .help("Digest-pinned release image or explicit local evaluation image"),
+                        )
+                        .arg(Arg::new("agent_arg").num_args(0..).trailing_var_arg(true)),
+                )
+                .subcommand_required(true),
+        )
+        .subcommand(
+            Command::new("boundary")
+                .about("Internal transport for the locked container boundary")
+                .hide(true)
+                .subcommand(
+                    Command::new("gateway")
+                        .arg(
+                            Arg::new("socket")
+                                .long("socket")
+                                .value_parser(clap::value_parser!(PathBuf))
+                                .required(true),
+                        )
+                        .arg(
+                            Arg::new("provider")
+                                .long("provider")
+                                .value_parser(["anthropic", "openai", "openrouter"])
+                                .required(true),
+                        )
+                        .arg(Arg::new("upstream").long("upstream").required(true))
+                        .arg(
+                            Arg::new("credential_file")
+                                .long("credential-file")
+                                .value_parser(clap::value_parser!(PathBuf))
+                                .required(true),
+                        ),
+                )
+                .subcommand(
+                    Command::new("agent")
+                        .arg(
+                            Arg::new("socket")
+                                .long("socket")
+                                .value_parser(clap::value_parser!(PathBuf))
+                                .required(true),
+                        )
+                        .arg(
+                            Arg::new("agent")
+                                .required(true)
+                                .value_parser(["claude", "codex", "opencode"]),
+                        )
+                        .arg(Arg::new("agent_arg").num_args(0..).trailing_var_arg(true)),
+                )
+                .subcommand_required(true),
+        )
+        .subcommand(
             Command::new("run")
                 .about("Run a supported coding agent through a declared boundary")
                 .arg(
@@ -412,6 +519,218 @@ fn cli() -> Command {
                 .arg(Arg::new("openrouter").long("openrouter-upstream"))
                 .arg(Arg::new("agent_arg").num_args(0..).trailing_var_arg(true)),
         )
+}
+
+async fn container_command(root: &Path, args: &ArgMatches) -> ExitCode {
+    let Some(("run", args)) = args.subcommand() else {
+        return ExitCode::FAILURE;
+    };
+    let Some(agent) = args.get_one::<String>("agent") else {
+        return fail("container agent is required");
+    };
+    let provider = match container_provider(agent, args.get_one::<String>("provider")) {
+        Ok(provider) => provider,
+        Err(error) => return fail(error),
+    };
+    let credential = if let Some(path) = args.get_one::<PathBuf>("credential_file") {
+        HostCredential::from_file(path)
+    } else {
+        let environment = args
+            .get_one::<String>("credential_env")
+            .map_or_else(|| provider_environment(provider), String::as_str);
+        HostCredential::from_environment(environment)
+    };
+    let credential = match credential {
+        Ok(credential) => credential,
+        Err(error) => return fail(&error.to_string()),
+    };
+    let workspace = match fs::canonicalize(root) {
+        Ok(path) => path,
+        Err(error) => {
+            return fail(&format!(
+                "could not resolve the container workspace: {}",
+                error.kind()
+            ));
+        }
+    };
+    let agent_args = args
+        .get_many::<String>("agent_arg")
+        .map(|values| values.cloned().collect::<Vec<_>>())
+        .unwrap_or_default();
+    let image = args
+        .get_one::<String>("image")
+        .cloned()
+        .unwrap_or_else(|| "blindfold-locked:local".to_owned());
+    let local_evaluation_image = image == "blindfold-locked:local";
+    let upstream = match (agent.as_str(), provider) {
+        (_, "anthropic") => "https://api.anthropic.com",
+        ("codex", "openai") => "https://api.openai.com/v1",
+        ("opencode", "openai") => "https://api.openai.com",
+        (_, "openrouter") => "https://openrouter.ai/api",
+        _ => return fail("container provider is invalid"),
+    };
+    let spec = match LockedRunSpec::new(
+        agent,
+        agent_args,
+        workspace,
+        credential.path().to_path_buf(),
+        upstream.to_owned(),
+        provider.to_owned(),
+        image,
+    ) {
+        Ok(spec) => spec,
+        Err(error) => return fail(&error.to_string()),
+    };
+    eprintln!("Blindfold locked container run:");
+    eprintln!("- agent network: none (loopback only)");
+    eprintln!("- allowed egress: supported model traffic through the Blindfold gateway");
+    eprintln!("- provider credential: gateway-only secret file");
+    eprintln!("- generic web, package, Git, SSH, and CONNECT egress: disabled");
+    if local_evaluation_image {
+        eprintln!(
+            "- image integrity: local evaluation image pinned to its current ID for this session"
+        );
+    }
+    match run_locked(spec).await {
+        Ok(status) => exit_from_code(status.code()),
+        Err(ContainerRunError::Interrupted) => ExitCode::from(130),
+        Err(error) => fail(&error.to_string()),
+    }
+}
+
+fn provider_environment(provider: &str) -> &'static str {
+    match provider {
+        "anthropic" => "ANTHROPIC_API_KEY",
+        "openrouter" => "OPENROUTER_API_KEY",
+        _ => "OPENAI_API_KEY",
+    }
+}
+
+fn container_provider<'a>(
+    agent: &str,
+    selected: Option<&'a String>,
+) -> Result<&'a str, &'static str> {
+    match (agent, selected.map(String::as_str)) {
+        ("claude", None | Some("anthropic")) => Ok("anthropic"),
+        ("codex", None | Some("openai")) => Ok("openai"),
+        ("opencode", Some(provider)) => Ok(provider),
+        ("opencode", None) => Err("OpenCode locked runs require --provider"),
+        ("claude", Some(_)) => Err("Claude locked runs require the Anthropic provider"),
+        ("codex", Some(_)) => Err("Codex locked runs require the OpenAI provider"),
+        _ => Err("container agent is invalid"),
+    }
+}
+
+async fn boundary_command(args: &ArgMatches) -> ExitCode {
+    match args.subcommand() {
+        Some(("gateway", args)) => {
+            let Some(socket) = args.get_one::<PathBuf>("socket") else {
+                return fail("gateway socket is required");
+            };
+            let Some(provider) = args
+                .get_one::<String>("provider")
+                .and_then(|value| GatewayProvider::parse(value))
+            else {
+                return fail("gateway provider is invalid");
+            };
+            let Some(upstream) = args.get_one::<String>("upstream") else {
+                return fail("gateway upstream is required");
+            };
+            let Some(credential_file) = args.get_one::<PathBuf>("credential_file") else {
+                return fail("gateway credential file is required");
+            };
+            match boundary::run_gateway(socket, provider, upstream, credential_file).await {
+                Ok(()) => ExitCode::SUCCESS,
+                Err(error) => fail(&error),
+            }
+        }
+        Some(("agent", args)) => {
+            let Some(socket) = args.get_one::<PathBuf>("socket") else {
+                return fail("gateway socket is required");
+            };
+            let Some(agent) = args.get_one::<String>("agent") else {
+                return fail("agent is required");
+            };
+            let agent_args = args
+                .get_many::<String>("agent_arg")
+                .map(|values| values.cloned().collect::<Vec<_>>())
+                .unwrap_or_default();
+            match boundary::run_agent(socket, agent, &agent_args).await {
+                Ok(code) => code,
+                Err(error) => fail(&error),
+            }
+        }
+        _ => ExitCode::FAILURE,
+    }
+}
+
+fn plugin_command(args: &ArgMatches) -> ExitCode {
+    match args.subcommand() {
+        Some(("list", _)) => plugin_list_command(),
+        Some(("validate", args)) => plugin_validate_command(args),
+        _ => ExitCode::FAILURE,
+    }
+}
+
+fn plugin_list_command() -> ExitCode {
+    let adapters = ["claude", "codex", "opencode"]
+        .into_iter()
+        .map(HarnessAdapter::load)
+        .collect::<Result<Vec<_>, _>>();
+    let adapters = match adapters {
+        Ok(adapters) => adapters,
+        Err(error) => return fail(&error.to_string()),
+    };
+    for adapter in adapters {
+        print_plugin_manifest(adapter.manifest());
+    }
+    ExitCode::SUCCESS
+}
+
+fn plugin_validate_command(args: &ArgMatches) -> ExitCode {
+    let directories = args.get_many::<PathBuf>("directory").into_iter().flatten();
+    let mut plugins = match load_explicit_plugins(directories) {
+        Ok(plugins) => plugins,
+        Err(error) => return fail(&format!("plugin validation failed: {error}")),
+    };
+    plugins.sort_by(|left, right| left.manifest().id().cmp(right.manifest().id()));
+    for plugin in &plugins {
+        print_plugin_manifest(plugin.manifest());
+    }
+    println!(
+        "Validated {} explicit plugin director{}; no plugin was installed, activated, or executed.",
+        plugins.len(),
+        if plugins.len() == 1 { "y" } else { "ies" }
+    );
+    ExitCode::SUCCESS
+}
+
+fn print_plugin_manifest(manifest: &blindfold_plugin_api::PluginManifest) {
+    let modes = manifest
+        .harness()
+        .noninteractive_modes()
+        .iter()
+        .map(|mode| match mode {
+            NonInteractiveMode::Print => "print",
+            NonInteractiveMode::Exec => "exec",
+            NonInteractiveMode::Review => "review",
+            NonInteractiveMode::Run => "run",
+        })
+        .collect::<Vec<_>>()
+        .join(",");
+    let protocol = match manifest.protocol() {
+        Protocol::BuiltinV1 => "builtin-v1",
+        Protocol::StdioJsonV1 => "stdio-json-v1",
+    };
+    println!(
+        "{} plugin={} protocol={} command={} harness=\"{}\" modes={}",
+        manifest.id(),
+        manifest.version(),
+        protocol,
+        manifest.harness().command(),
+        manifest.harness().version_requirement(),
+        modes
+    );
 }
 
 fn init(root: &Path) -> ExitCode {
@@ -2324,6 +2643,10 @@ fn is_blocked_llm_provider(host: &str) -> bool {
 
 #[allow(clippy::too_many_lines)] // Agent startup and shutdown sequence is clearest in order.
 async fn run_agent_command(root: &Path, args: &ArgMatches, trace_enabled: bool) -> ExitCode {
+    let locked_boundary = env::var_os("BLINDFOLD_LOCKED_BOUNDARY").is_some();
+    if locked_boundary && let Err(error) = boundary::verify_network_none() {
+        return fail(&error);
+    }
     let agent = args
         .get_one::<String>("agent")
         .map_or("claude", String::as_str);
@@ -2369,18 +2692,32 @@ async fn run_agent_command(root: &Path, args: &ArgMatches, trace_enabled: bool) 
         Err(error) => return fail(&error.to_string()),
     };
 
-    eprintln!("Blindfold managed model boundary active (not whole-agent containment):");
+    if locked_boundary {
+        eprintln!("Blindfold locked container boundary active:");
+    } else {
+        eprintln!("Blindfold managed model boundary active (not whole-agent containment):");
+    }
     eprintln!("- harness adapter: {} (version compatible)", adapter.id());
     eprintln!("- managed provider request/response proxy: available");
     eprintln!("- child stdout/stderr sanitization: enabled");
-    eprintln!("- direct filesystem/network bypass prevention: unavailable");
-    eprintln!("- proxy-aware provider egress blocking: enabled");
-    eprintln!("- proxy-aware unknown egress domains: blocked unless allowed by project policy");
+    if locked_boundary {
+        eprintln!("- direct IP network egress: disabled by the agent container");
+        eprintln!("- cross-container path: one Blindfold Unix socket");
+        eprintln!("- generic web, package, Git, and CONNECT egress: unavailable");
+    } else {
+        eprintln!("- direct filesystem/network bypass prevention: unavailable");
+        eprintln!("- proxy-aware provider egress blocking: enabled");
+        eprintln!("- proxy-aware unknown egress domains: blocked unless allowed by project policy");
+    }
     eprintln!(
         "- agent file reads: unmediated; if the agent opens .env directly, it can see raw contents"
     );
     eprintln!("- parent secret environment isolation: available");
-    eprintln!("- provider credential broker: unavailable; use the agent credential store");
+    if locked_boundary {
+        eprintln!("- provider credential: isolated in and injected by the gateway container");
+    } else {
+        eprintln!("- provider credential broker: unavailable; use the agent credential store");
+    }
     eprintln!(
         "- payload-free request tracing: {}",
         if trace_enabled { "enabled" } else { "disabled" }
@@ -2459,7 +2796,7 @@ async fn run_agent_command(root: &Path, args: &ArgMatches, trace_enabled: bool) 
     };
 
     let mut command = tokio::process::Command::new(agent_command);
-    configure_managed_agent_environment(&mut command);
+    configure_managed_agent_environment(&mut command, locked_boundary);
     configure_agent_command(kind, &mut command, &agent_args, &proxy_origin);
     command.env("HTTP_PROXY", &egress_origin);
     command.env("HTTPS_PROXY", &egress_origin);
@@ -2570,7 +2907,10 @@ const fn run_trace_route(kind: HarnessKind) -> TraceRoute {
     }
 }
 
-fn configure_managed_agent_environment(command: &mut tokio::process::Command) {
+fn configure_managed_agent_environment(
+    command: &mut tokio::process::Command,
+    locked_boundary: bool,
+) {
     command.env_clear();
     for name in [
         "PATH",
@@ -2591,6 +2931,14 @@ fn configure_managed_agent_environment(command: &mut tokio::process::Command) {
         if let Some(value) = env::var_os(name) {
             command.env(name, value);
         }
+    }
+    if locked_boundary {
+        command.env("ANTHROPIC_API_KEY", "blindfold-managed-placeholder");
+        command.env("OPENAI_API_KEY", "sk-blindfold-managed-placeholder");
+        command.env(
+            "OPENROUTER_API_KEY",
+            "sk-or-v1-blindfold-managed-placeholder",
+        );
     }
 }
 

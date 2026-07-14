@@ -114,15 +114,51 @@ an in-process library, shell command, policy implementation, or restoration path
 Hook-result sanitization tests become mandatory before a manifest may declare tool
 events.
 
+## Locked Container Boundary
+
+`bf container run` is a separate Docker-only preview. Build its common gateway/agent
+image with:
+
+```sh
+docker build -f containers/Dockerfile.locked -t blindfold-locked:local .
+```
+
+The ordinary CLI suite does not start Docker. It checks fail-closed CLI validation and
+the exact Docker argv for the agent, gateway, resource limits, mounts, labels, and
+session cleanup. Those tests are necessary but do not establish that a real Docker
+Engine produced the documented namespace and mount topology.
+
+The 2026-07-14 macOS/ARM64 implementation run supplied one manual instance of this
+evidence: Docker inspection confirmed the mount split and hardening, route inspection
+found no IPv4 and only loopback IPv6 routes, direct IP returned `ENETUNREACH`, DNS
+returned `EAI_AGAIN`, the gateway path was reachable, and exact cleanup left no labeled
+containers or volumes. This must be repeated or automated for release candidates; it is
+not a substitute for the platform matrix below.
+
+A change to the locked boundary requires a local-Engine end-to-end test before its OS
+control can be reported as verified. That evidence must inspect the running agent
+namespace, prove absence of non-loopback IPv4 and IPv6 routes, prove the provider key is
+absent from the agent environment and mounts, prove the gateway has no workspace mount,
+exercise sanitized request and response traffic against a controlled fake provider, and
+verify exact session cleanup. Never use a live provider credential or production data
+for this test.
+
+The locked tier deliberately has no package, web, Git, SSH, network MCP, or arbitrary
+CONNECT egress. Do not weaken that restriction to make a development smoke test more
+convenient. Read [Locked Container Boundary](container-boundary.md),
+[ADR 0010](decisions/0010-locked-container-egress-boundary.md), and the
+[Adversarial Verification Report](../BLINDFOLD_STRESS_TEST_REPORT.md) before changing
+the launcher or image.
+
 ## CI Layout
 
 - `quality`: format and Clippy on Linux;
-- `test`: workspace tests on Linux and macOS;
+- `test`: workspace tests on Linux and macOS, including static locked-launcher tests;
 - `supply-chain`: RustSec and `cargo-deny`;
 - `secrets`: redacted Gitleaks scan.
 
-The workflow intentionally avoids service containers, caching layers, and release logic
-at Phase 0.
+The workflow currently has no live Docker topology job. Therefore it does not yet supply
+release evidence for the locked boundary by itself.
 
 ## Release Preparation
 
@@ -139,4 +175,5 @@ gitleaks detect --source . --config .github/gitleaks.toml --redact
 ```
 
 Release evidence must also cover supported-platform installation, documentation, and
-no-raw-fixture leak tests once those features exist.
+no-raw-fixture leak tests. A release that includes the locked preview must additionally
+record the local-Docker topology checks described above on each claimed host platform.

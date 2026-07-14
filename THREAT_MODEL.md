@@ -8,9 +8,11 @@ they reach an LLM, agent-visible managed output, diagnostics, audit, or trace st
 Plaintext restoration is limited to an independently authorized trusted operation and
 destination.
 
-This is not whole-agent containment. `bf run` protects accepted provider traffic and
-captured process output; it does not prevent the agent from reading host files or opening
-a socket that ignores proxy settings.
+Native `bf run` is not whole-agent containment: it protects accepted provider traffic
+and captured process output but does not prevent a socket that ignores proxy settings.
+Preview `bf container run` adds an OS-enforced model-only egress path. It still lets the
+agent read the mounted workspace and cannot promise detection of transformed or semantic
+sensitive facts.
 
 The strict harness-manifest parser/host and built-in version gates from ADR 0009 are
 implemented. External adapter execution and native tool hooks are not. This does not
@@ -35,7 +37,8 @@ Trusted:
 
 - the Blindfold process and its detector, policy, proxy, vault, execution, and broker
   components;
-- the operating system, kernel, user account, and release artifact;
+- the operating system, kernel, user account, Docker Engine, selected container image,
+  and release artifact for a locked run;
 - a child process only for a specific secret explicitly granted through `bf exec`; and
 - a remote API only for the exact value intentionally sent by `bf call` or provider
   authentication.
@@ -51,8 +54,10 @@ Untrusted:
 - installed adapter metadata until core validates its schema, version, invocation, and
   capability requirements for the current run.
 
-The current caller-supplied vault key is trusted but not OS-keychain managed. Agent
-persistent login stores are outside Blindfold and may be readable by the agent process.
+The current caller-supplied vault key is trusted but not OS-keychain managed. During
+native `bf run`, agent persistent login stores are outside Blindfold and may be readable
+by the agent process. Locked mode does not mount those stores and instead gives the real
+provider credential only to the gateway.
 
 ## Implemented Data Paths
 
@@ -65,6 +70,7 @@ persistent login stores are outside Blindfold and may be readable by the agent p
 | `call` | allowed-host bearer injection and bounded response redaction | explicitly allowed API |
 | provider proxy | recursive JSON sanitization in both directions | allowlisted provider receives sanitized payload plus its own auth |
 | agent runner | clean parent env, managed provider route, proxy-aware egress policy, captured output | supported noninteractive agent receives no parent env secrets |
+| locked agent runner | Docker `network=none`, one Unix-socket gateway, gateway-only credential, fixed provider origin | supported provider receives only accepted sanitized payload plus gateway auth |
 | MCP stdio | recursive agent-bound sanitization; CLI restoration denied | no plaintext restoration in CLI preview |
 | Python SDK | registered strings protected in supported request and response shapes | PII may restore only to `end_user` |
 | TypeScript SDK | explicitly registered strings tokenized before the caller sends them | PII may restore only to `end_user` |
@@ -90,16 +96,17 @@ Accepted provider protocols are restricted to:
 
 - JSON POST bodies;
 - bounded Anthropic response SSE on `messages`; and
+- bounded OpenAI-compatible response SSE on `chat/completions`; and
 - JSON-object text messages on the OpenAI Responses WebSocket.
 
-SSE requests, OpenAI SSE, unknown content types, sensitive JSON keys, non-POST HTTP,
-arbitrary WebSocket paths, opaque/binary frames, nonempty control frames, and proxy-loop
-markers fail closed. Responses are fully bounded before release, so split values cannot
-escape at network chunk boundaries.
+SSE requests, SSE on other routes, unknown content types, sensitive JSON keys, non-POST
+HTTP, arbitrary WebSocket paths, opaque/binary frames, nonempty control frames, and
+proxy-loop markers fail closed. Responses are fully bounded before release, so split
+values cannot escape at network chunk boundaries.
 
 ## Explicitly Unmediated Paths
 
-During `bf run`, Blindfold does not mediate:
+During native `bf run`, Blindfold does not mediate:
 
 - reads of `.env`, workspace files, `~/.ssh`, `~/.aws`, `.netrc`, agent login stores, or
   any other file available to the current user;
@@ -112,6 +119,13 @@ During `bf run`, Blindfold does not mediate:
 
 Trace records mark runner sessions degraded with `direct_filesystem_unmediated`. They
 cannot observe what an agent read from disk or sent through an unmediated socket.
+
+During `bf container run`, the agent still reads raw workspace files and can transform
+their contents. The launcher rejects workspace sockets, FIFOs, device nodes, and nested
+mount devices, does not mount the host home or credential, and gives the agent only
+loopback plus the Blindfold Unix socket. Subject to the trusted host/runtime/image and no
+escape, ordinary direct IP egress is blocked. Detector false negatives inside the one
+permitted model channel remain possible.
 
 ## Harness Adapter Threats
 
@@ -130,8 +144,8 @@ Future supported tool-result hooks could reduce one exposure path by routing bou
 results through the core sanitizer before the next model call. Hook payloads would be
 untrusted, and a hook would not prove that every tool path was observed. The provider
 proxy remains the final check for supported model traffic. A malicious tool can still
-send data directly over TCP, UDP, DNS, Unix sockets, IPC, or another unmediated path;
-preventing that requires OS-enforced containment.
+send data directly in native mode. Locked container mode separately contains ordinary
+agent/tool IP egress; hook support would not replace that OS control.
 
 Adapter control status:
 
@@ -142,7 +156,7 @@ Adapter control status:
 | Unknown or incompatible harness | exact compatibility-version probe implemented for built-in runs; this does not authenticate the executable |
 | Adapter requests unavailable control | exact built-in capability validation implemented; external execution pending |
 | Hook bypass or unsupported tool-result shape | native hooks pending; provider proxy remains final model check |
-| Tool sends data outside model path | OS network/process isolation not implemented |
+| Tool sends data outside model path | blocked for ordinary IP egress in locked container mode; native mode remains uncontained |
 
 ## In-Scope Threats And Controls
 
@@ -156,6 +170,8 @@ Adapter control status:
 | Forged/replayed SafeRef | random syntax, authenticated vault, project/session scope, kind and expiry checks |
 | Secret in trace/audit/error | closed schemas without payload/header/query fields and safe static errors |
 | Remote proxy exposure | CLI listeners bind to ephemeral loopback addresses |
+| Agent opens a direct network socket | locked mode uses Docker `network=none` and verifies no non-loopback IPv4/IPv6 route exists |
+| Agent reads the real provider credential | locked mode mounts it only into the gateway, which replaces agent auth |
 | Unsafe output overwrite | create-new default and explicit atomic `--force` replacement |
 | Committed secret | diff scanning, Gitleaks CI, and isolated synthetic fixtures |
 
@@ -163,13 +179,16 @@ Adapter control status:
 
 - Detector false negatives can pass an unknown or transformed value on a managed path.
 - Detector false positives can alter or reject benign data.
+- Encoded, encrypted, split, or semantically transformed data can evade detectors inside
+  the permitted model channel.
 - Provider authentication headers intentionally reach their named provider.
 - Fully buffering accepted SSE improves split-boundary safety but increases latency and
   denial-of-service pressure within configured limits.
 - Labels, timing, counts, SafeRef use, and safe structural locations reveal metadata.
 - Encrypted vault records can remain in filesystem backups after local deletion.
-- The caller-managed vault key and persistent agent credentials are not yet isolated by
-  an OS credential broker.
+- The caller-managed vault key is not yet isolated by an OS credential broker. Native
+  runs still rely on persistent agent credentials; locked runs instead isolate the
+  selected host provider credential in the gateway.
 
 ## Security Invariants
 
@@ -181,7 +200,8 @@ Adapter control status:
 6. Managed listeners are loopback-only in current CLI use.
 7. Audit, trace, error, and diagnostic schemas cannot contain arbitrary payloads.
 8. Tests use synthetic fixtures and search all managed outputs/artifacts for raw values.
-9. Startup and documentation identify filesystem and direct-network gaps explicitly.
+9. Startup and documentation distinguish native direct-network gaps from locked-mode
+   egress enforcement and its assumptions.
 10. Whole-agent containment is never claimed without OS-enforced workspace, process,
     credential, IPC, and network isolation.
 11. Adapter manifests are non-authorizing data and cannot replace core enforcement.

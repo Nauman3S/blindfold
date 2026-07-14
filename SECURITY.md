@@ -71,8 +71,9 @@ today.
 
 Once native harness hooks are supported, failure to sanitize a managed tool result
 before its next model call is relevant. Direct network exfiltration by a tool remains
-outside the current managed boundary until OS containment exists, but documentation or
-status that claims otherwise is a security issue.
+outside native `bf run`. In locked `bf container run`, an ordinary tool gaining direct
+IP egress or the gateway credential contradicts the documented boundary and is in
+scope. Neither mode promises detection of transformed or semantic sensitive values.
 
 Behavior explicitly identified as outside the managed boundary may still be worth
 reporting when the product or documentation makes that limitation unclear.

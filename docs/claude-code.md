@@ -7,7 +7,7 @@ bf run claude -- --print "summarize this repo"
 bf run claude -- -p --model sonnet "summarize this repo"
 ```
 
-The embedded adapter accepts only Claude Code `2.1.152`. Missing, ambiguous, or
+The embedded adapter accepts only Claude Code `2.1.202`. Missing, ambiguous, or
 different `claude --version` output rejects the run before the proxy or agent starts.
 
 Bare interactive Claude, resume/continue, remote control, worktrees, plugin URLs, tmux,
@@ -20,3 +20,14 @@ variables. Authentication currently relies on Claude's persistent login or crede
 store. Blindfold does not yet broker that credential or mediate Claude's filesystem
 reads and direct sockets, so this is a managed model-traffic boundary rather than an OS
 sandbox. See [Noninteractive Coding Agents](coding-agents.md) for the complete contract.
+
+For the model-only OS egress boundary, export `ANTHROPIC_API_KEY` on the host and run:
+
+```sh
+bf container run claude -- --print "summarize this repo"
+```
+
+The real key is mounted only into the gateway. Claude receives a placeholder, Docker's
+`none` network, and a loopback relay to the gateway's Unix socket. The same exact Claude
+version and print-only grammar remain enforced. See
+[Locked Container Boundary](container-boundary.md).

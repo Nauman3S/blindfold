@@ -7,7 +7,7 @@ entrypoint = "builtin/codex-cli"
 
 [harness]
 command = "codex"
-version = "=0.144.1"
+version = "=0.144.4"
 noninteractive_modes = ["exec", "review"]
 
 [capabilities]
